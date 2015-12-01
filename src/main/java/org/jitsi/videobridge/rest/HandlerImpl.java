@@ -124,7 +124,7 @@ import org.osgi.framework.*;
  *       <td>GET</td>
  *       <td>/colibri/conferences/{id}</td>
  *       <td>
- *         200 OK with a JSON object which represents the conference with the 
+ *         200 OK with a JSON object which represents the conference with the
  *         specified <tt>id</tt>. For example:
  * <code>
  * {

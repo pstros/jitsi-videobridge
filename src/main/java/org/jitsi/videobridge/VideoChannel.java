@@ -242,6 +242,7 @@ public class VideoChannel
         // Initialize the RTCP termination strategy from the configuration.
         String strategyFQN = cfg.getString(RTCP_TERMINATION_STRATEGY_PNAME, "");
 
+        logger.info("Termination strategy selected: '" + strategyFQN + "'");
         if (StringUtils.isNullOrEmpty(strategyFQN))
         {
             return;
@@ -1325,6 +1326,11 @@ public class VideoChannel
                         + ". Packets reported lost: " + lostPackets);
         }
 
+        Iterator<Integer> pktIter = lostPackets.iterator();
+        while (pktIter.hasNext()) {
+          logger.trace("STAT_SSRC_RECEIVED_NACK " + ssrc + " " + pktIter.next());
+        }
+
         RawPacketCache cache;
         RtxTransformer rtxTransformer;
 
@@ -1674,7 +1680,18 @@ public class VideoChannel
             MediaFormat format = entry.getValue();
             if (Constants.RED.equals(format.getEncoding()))
             {
+<<<<<<< Updated upstream
                 for (Integer ssrc : ssrcGroup)
+=======
+                Iterator<Integer> newLostIter = newNack.getLostPackets().iterator();
+                while (newLostIter.hasNext()) {
+                  logger.trace("STAT_SSRC_SENT_NACK " + ssrc + " " + newLostIter.next());
+                }
+
+                Set<RtpChannel> channelsToSendTo = new HashSet<RtpChannel>();
+                Channel channel = getContent().findChannelByReceiveSSRC(ssrc);
+                if (channel != null && channel instanceof RtpChannel)
+>>>>>>> Stashed changes
                 {
                     ssrc2red.put(ssrc, pt);
                 }
