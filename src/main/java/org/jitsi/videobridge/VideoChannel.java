@@ -236,50 +236,54 @@ public class VideoChannel
 
         if (cfg == null)
         {
+            logger.warn("NOT initializing RTCP n' NACK termination because "
+                    + "the configuration service was not found.");
             return;
         }
 
         // Initialize the RTCP termination strategy from the configuration.
         String strategyFQN = cfg.getString(RTCP_TERMINATION_STRATEGY_PNAME, "");
-
         logger.info("Termination strategy selected: '" + strategyFQN + "'");
-        if (StringUtils.isNullOrEmpty(strategyFQN))
+        if (!StringUtils.isNullOrEmpty(strategyFQN))
         {
-            return;
-        }
 
-        RTCPTerminationStrategy strategy;
-
-        try
-        {
-            strategy
-                = (RTCPTerminationStrategy)
+            RTCPTerminationStrategy strategy = null;
+            try
+            {
+                strategy = (RTCPTerminationStrategy)
                     Class.forName(strategyFQN).newInstance();
-        }
-        catch (Exception e)
-        {
-            logger.error(
-                    "Failed to configure the video channel RTCP termination"
+            }
+            catch (Exception e)
+            {
+                logger.error(
+                        "Failed to configure the video channel RTCP termination"
                         + " strategy.",
-                    e);
+                        e);
+            }
 
-            return;
+            if (strategy != null)
+            {
+                logger.debug("Initializing RTCP termination.");
+                MediaStream stream = getStream();
+
+                // Initialize the RTCP termination strategy.
+                if (strategy instanceof VideoChannelRTCPTerminationStrategy)
+                {
+                    ((VideoChannelRTCPTerminationStrategy) strategy)
+                        .initialize(this);
+                }
+
+                stream.setRTCPTerminationStrategy(strategy);
+            }
+
         }
-
-        MediaStream stream = getStream();
-
-        // Initialize the RTCP termination strategy.
-        if (strategy instanceof VideoChannelRTCPTerminationStrategy)
-        {
-            ((VideoChannelRTCPTerminationStrategy) strategy).initialize(this);
-        }
-
-        stream.setRTCPTerminationStrategy(strategy);
 
         boolean enableNackTermination
                 = !cfg.getBoolean(DISABLE_NACK_TERMINATION_PNAME, false);
         if (enableNackTermination)
         {
+            logger.debug("Initializing NACK termination.");
+            MediaStream stream = getStream();
             RawPacketCache cache = stream.getPacketCache();
             if (cache != null)
             {
