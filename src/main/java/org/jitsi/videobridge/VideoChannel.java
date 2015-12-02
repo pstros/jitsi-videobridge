@@ -1408,6 +1408,12 @@ public class VideoChannel
         RawPacket pkt = null;
         try
         {
+
+          Iterator<Integer> newLostIter = newNack.getLostPackets().iterator();
+          while (newLostIter.hasNext()) {
+            logger.trace("STAT_SSRC_SENT_NACK " + mediaSourceSsrc + " " + newLostIter.next());
+          }
+
             pkt = newNack.toRawPacket();
         }
         catch (IOException ioe)
@@ -1680,18 +1686,7 @@ public class VideoChannel
             MediaFormat format = entry.getValue();
             if (Constants.RED.equals(format.getEncoding()))
             {
-<<<<<<< Updated upstream
                 for (Integer ssrc : ssrcGroup)
-=======
-                Iterator<Integer> newLostIter = newNack.getLostPackets().iterator();
-                while (newLostIter.hasNext()) {
-                  logger.trace("STAT_SSRC_SENT_NACK " + ssrc + " " + newLostIter.next());
-                }
-
-                Set<RtpChannel> channelsToSendTo = new HashSet<RtpChannel>();
-                Channel channel = getContent().findChannelByReceiveSSRC(ssrc);
-                if (channel != null && channel instanceof RtpChannel)
->>>>>>> Stashed changes
                 {
                     ssrc2red.put(ssrc, pt);
                 }
