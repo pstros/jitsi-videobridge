@@ -1332,7 +1332,7 @@ public class VideoChannel
 
         Iterator<Integer> pktIter = lostPackets.iterator();
         while (pktIter.hasNext()) {
-          logger.trace("STAT_SSRC_RECEIVED_NACK " + ssrc + " " + pktIter.next());
+          logger.trace("STAT " + ssrc + "_RECEIVED_NACK:" + pktIter.next());
         }
 
         RawPacketCache cache;
@@ -1415,7 +1415,7 @@ public class VideoChannel
 
           Iterator<Integer> newLostIter = newNack.getLostPackets().iterator();
           while (newLostIter.hasNext()) {
-            logger.trace("STAT_SSRC_SENT_NACK " + mediaSourceSsrc + " " + newLostIter.next());
+            logger.trace("STAT " + mediaSourceSsrc + "_SENT_NACK:" + newLostIter.next());
           }
 
             pkt = newNack.toRawPacket();
