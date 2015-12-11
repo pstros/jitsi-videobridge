@@ -215,8 +215,9 @@ public class VideoChannel
             = content.getConference().getVideobridge()
                         .getConfigurationService();
         requestRetransmissions
-            = (cfg != null && cfg.getBoolean(
-                        VideoMediaStream.REQUEST_RETRANSMISSIONS_PNAME, false));
+            = cfg != null
+                && cfg.getBoolean(
+                        VideoMediaStream.REQUEST_RETRANSMISSIONS_PNAME, false);
     }
 
     /**
@@ -1003,16 +1004,24 @@ public class VideoChannel
     @Override
     public void setLastN(Integer lastN)
     {
-        if (this.lastN == lastN)
+        // XXX Comparing Integer references may not be enough to short-circuit
+        // so a more complex comaprison for equality is implemented bellow.
+        if (this.lastN == null)
+        {
+            if (lastN == null)
+                return;
+        }
+        else if (lastN != null && this.lastN.intValue() == lastN.intValue())
+        {
             return;
+        }
 
+        Lock writeLock = lastNSyncRoot.writeLock();
+        List<Endpoint> endpointsEnteringLastN = new LinkedList<>();
         // If the old value was null, even though we may detect endpoints
         // "entering" lastN, they are already being received and so no keyframes
         // are necessary.
         boolean askForKeyframes = this.lastN == null;
-
-        Lock writeLock = lastNSyncRoot.writeLock();
-        List<Endpoint> endpointsEnteringLastN = new LinkedList<>();
 
         writeLock.lock();
         try
@@ -1020,68 +1029,60 @@ public class VideoChannel
             // XXX(gp) question to the lastN guru : if this.lastN == null or
             // this.lastN < 0, do we really want to call lastNEndpointsChanged
             // with an empty (but not null!!) list of endpoints?
-            if (this.lastN != null && this.lastN >= 0)
+            if (this.lastN != null && this.lastN >= 0 && lastN > this.lastN)
             {
-                if (lastN > this.lastN)
+                Endpoint pinnedEndpoint = getEffectivePinnedEndpoint();
+                // The pinned endpoint is always in the last N set, if
+                // last N > 0; Count it here.
+                int n = (pinnedEndpoint != null) ? 1 : 0;
+                Endpoint thisEndpoint = getEndpoint();
+
+                // We do not hold any lock on lastNSyncRoot here because it
+                // should be OK for multiple threads to check whether
+                // lastNEndpoints is null and invoke the method to populate it
+                // because (1) the method to populate lastNEndpoints will
+                // acquire the necessary locks to ensure preserving the
+                // correctness of the state of this instance under the
+                // conditions of concurrent access and (2) we do not want to
+                // hold a write lock on lastNSyncRoot while invoking the method
+                // to populate lastNEndpoints because the latter might fire an
+                // event.
+                if (lastNEndpoints == null)
                 {
-                    Endpoint pinnedEndpoint = getEffectivePinnedEndpoint();
-                    // The pinned endpoint is always in the last N set, if
-                    // last N > 0; Count it here.
-                    int n = (pinnedEndpoint != null) ? 1 : 0;
-                    Endpoint thisEndpoint = getEndpoint();
+                    // Pretend that the ordered list of Endpoints maintained by
+                    // conferenceSpeechActivity has changed in order to populate
+                    // lastNEndpoints.
+                    speechActivityEndpointsChanged(null);
+                }
 
-                    // We do not hold any lock on lastNSyncRoot here because it
-                    // should be OK for multiple threads to check whether
-                    // lastNEndpoints is null and invoke the method to populate
-                    // it because (1) the method to populate lastNEndpoints will
-                    // acquire the necessary locks to ensure preserving the
-                    // correctness of the state of this instance under the
-                    // conditions of concurrent access and (2) we do not want
-                    // to hold a write lock on lastNSyncRoot while invoking the
-                    // method to populate lastNEndpoints because the latter
-                    // might fire an event.
-                    if (lastNEndpoints == null)
+                if (lastNEndpoints != null)
+                {
+                    for (WeakReference<Endpoint> wr : lastNEndpoints)
                     {
-                        // Pretend that the ordered list of Endpoints maintained
-                        // by conferenceSpeechActivity has changed in order to
-                        // populate lastNEndpoints.
-                        speechActivityEndpointsChanged(null);
-                    }
+                        if (n >= lastN)
+                            break;
 
-                    if (lastNEndpoints != null)
-                    {
-                        for (WeakReference<Endpoint> wr : lastNEndpoints)
+                        Endpoint endpoint = wr.get();
+
+                        if (endpoint != null)
                         {
-                            if (n >= lastN)
-                                break;
+                            if (endpoint.equals(thisEndpoint))
+                                continue;
 
-                            Endpoint endpoint = wr.get();
-
-                            if (endpoint != null)
-                            {
-                                if (endpoint.equals(thisEndpoint))
-                                    continue;
-
-                                // We've already signaled to the client the fact
-                                // that the pinned endpoint has entered the
-                                // lastN set when we handled the
-                                //
-                                //     PINNED_ENDPOINT_PROPERTY_NAME
-                                //
-                                // property change event.
-                                //
-                                // Also, we've already counted it above. So, we
-                                // don't want to either add it in the
-                                // endpointsEnteringLastN or count it here.
-
-                                if (endpoint.equals(pinnedEndpoint))
-                                    continue;
-                            }
-
-                            ++n;
-                            if (n > this.lastN && endpoint != null)
-                                endpointsEnteringLastN.add(endpoint);
+                            // We've already signaled to the client the fact
+                            // that the pinned endpoint has entered the lastN
+                            // set when we handled the
+                            // PINNED_ENDPOINT_PROPERTY_NAME property change
+                            // event. Also, we've already counted it above. So,
+                            // we don't want to either add it in the
+                            // endpointsEnteringLastN or count it here.
+                            if (endpoint.equals(pinnedEndpoint))
+                                continue;
                         }
+
+                        ++n;
+                        if (n > this.lastN && endpoint != null)
+                            endpointsEnteringLastN.add(endpoint);
                     }
                 }
             }
@@ -1095,10 +1096,8 @@ public class VideoChannel
 
         lastNEndpointsChanged(endpointsEnteringLastN);
 
-        if (askForKeyframes)
-        {
+        if (askForKeyframes && !endpointsEnteringLastN.isEmpty())
             getContent().askForKeyframes(new HashSet<>(endpointsEnteringLastN));
-        }
 
         touch(); // It seems this Channel is still active.
     }
@@ -1491,14 +1490,14 @@ public class VideoChannel
             return;
         }
 
-        // Setup simulcast layers from source groups.
+        // Setup simulcast streams from source groups.
         SimulcastEngine simulcastEngine
             = getTransformEngine().getSimulcastEngine();
 
-        Map<Long, SimulcastLayer> ssrc2layer = new HashMap<>();
+        Map<Long, SimulcastStream> ssrc2stream = new HashMap<>();
 
-        // Build the simulcast layers.
-        SimulcastLayer[] layers = null;
+        // Build the simulcast streams.
+        SimulcastStream[] simulcastStreams = null;
         for (SourceGroupPacketExtension sourceGroup : sourceGroups)
         {
             List<SourcePacketExtension> sources = sourceGroup.getSources();
@@ -1511,32 +1510,33 @@ public class VideoChannel
             }
 
             // sources are in low to high order.
-            layers = new SimulcastLayer[sources.size()];
+            simulcastStreams = new SimulcastStream[sources.size()];
             for (int i = 0; i < sources.size(); i++)
             {
                 SourcePacketExtension source = sources.get(i);
                 Long primarySSRC = source.getSSRC();
-                SimulcastLayer simulcastLayer = new SimulcastLayer(
+                SimulcastStream simulcastStream = new SimulcastStream(
                     simulcastEngine.getSimulcastReceiver(), primarySSRC, i);
 
-                // Add the layer to the reverse map.
-                ssrc2layer.put(primarySSRC, simulcastLayer);
+                // Add the stream to the reverse map.
+                ssrc2stream.put(primarySSRC, simulcastStream);
 
-                // Add the layer to the sorted set.
-                layers[i] = simulcastLayer;
+                // Add the stream to the sorted set.
+                simulcastStreams[i] = simulcastStream;
             }
 
         }
 
         // FID groups have been saved in RtpChannel. Make sure any changes are
-        // propagated to the appropriate SimulcastLayer-s.
+        // propagated to the appropriate SimulcastStream-s.
         for (Map.Entry<Long, Long> entry : this.fidSourceGroups.entrySet())
         {
-            SimulcastLayer simulcastLayer = ssrc2layer.get(entry.getKey());
-            simulcastLayer.setRTXSSRC(entry.getValue());
+            SimulcastStream simulcastStream = ssrc2stream.get(entry.getKey());
+            simulcastStream.setRTXSSRC(entry.getValue());
         }
 
-        simulcastEngine.getSimulcastReceiver().setSimulcastLayers(layers);
+        simulcastEngine
+            .getSimulcastReceiver().setSimulcastStreams(simulcastStreams);
     }
 
     /**
@@ -1648,13 +1648,13 @@ public class VideoChannel
             return;
         }
 
-        SimulcastLayer[] layers
-            = sim.getSimulcastReceiver().getSimulcastLayers();
+        SimulcastStream[] streams
+            = sim.getSimulcastReceiver().getSimulcastStreams();
 
-        if (layers == null || layers.length == 0)
+        if (streams == null || streams.length == 0)
         {
             logDebug("Can't update our view of the peer video channel because" +
-                    " the peer doesn't have any simulcast layers.");
+                    " the peer doesn't have any simulcast streams.");
             return;
         }
 
@@ -1662,10 +1662,10 @@ public class VideoChannel
         final Set<Integer> ssrcGroup = new HashSet<>();
         final Map<Integer, Integer> rtxGroups = new HashMap<>();
 
-        for (SimulcastLayer layer : layers)
+        for (SimulcastStream stream : streams)
         {
-            int primarySSRC = (int) layer.getPrimarySSRC();
-            int rtxSSRC = (int) layer.getRTXSSRC();
+            int primarySSRC = (int) stream.getPrimarySSRC();
+            int rtxSSRC = (int) stream.getRTXSSRC();
 
             ssrcGroup.add(primarySSRC);
 
@@ -1675,9 +1675,9 @@ public class VideoChannel
             }
         }
 
-        SimulcastLayer baseLayer = layers[0];
-        final Integer ssrcTargetPrimary = (int) baseLayer.getPrimarySSRC();
-        final Integer ssrcTargetRTX = (int) baseLayer.getRTXSSRC();
+        SimulcastStream baseStream = streams[0];
+        final Integer ssrcTargetPrimary = (int) baseStream.getPrimarySSRC();
+        final Integer ssrcTargetRTX = (int) baseStream.getRTXSSRC();
 
         // Update the SSRC rewriting engine from the media stream state.
         final Map<Integer, Byte> ssrc2fec = new HashMap<>();
@@ -1736,5 +1736,4 @@ public class VideoChannel
             logger.warn(msg);
         }
     }
-
 }

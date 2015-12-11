@@ -18,8 +18,6 @@ package org.jitsi.videobridge.metrics;
 import com.newrelic.api.agent.NewRelic;
 import java.util.*;
 
-import org.jitsi.util.*;
-
 /**
  * A reference implementation of MetricServicePublisher for
  * <a href="http://www.NewRelic.com">NewRelic.com</a>
@@ -30,12 +28,6 @@ import org.jitsi.util.*;
 public class NewRelicMetricPublisher
     implements MetricServicePublisher
 {
-    /**
-     * Our logger.
-     */
-    private static final Logger logger
-        = Logger.getLogger(NewRelicMetricPublisher.class);
-
     /**
      * The transaction map.
      */
@@ -51,7 +43,7 @@ public class NewRelicMetricPublisher
      */
     public NewRelicMetricPublisher()
     {
-        this.transactions = new LinkedHashMap<String, Map<String, Long>>();
+        this.transactions = new LinkedHashMap<>();
     }
 
     /**
@@ -179,7 +171,7 @@ public class NewRelicMetricPublisher
         Map<String, Long> store = this.transactions.get(transactionType);
         if (store == null)
         {
-            store = new LinkedHashMap<String, Long>();
+            store = new LinkedHashMap<>();
             this.transactions.put(transactionType, store);
         }
         return store;

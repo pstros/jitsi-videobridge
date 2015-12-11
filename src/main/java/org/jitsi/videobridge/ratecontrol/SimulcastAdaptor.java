@@ -61,8 +61,7 @@ public class SimulcastAdaptor
                 int numEndpointsThatFitIn
                     = bitrateController.calcNumEndpointsThatFitIn();
                 Endpoint self = channel.getEndpoint();
-                Map<String, Object> map
-                    = new HashMap<String, Object>(2);
+                Map<String, Object> map = new HashMap<>(2);
                 map.put("self", self);
                 map.put("numEndpointsThatFitIn", numEndpointsThatFitIn);
                 StringCompiler sc = new StringCompiler(map);
@@ -83,18 +82,17 @@ public class SimulcastAdaptor
     {
         VideoChannel channel = bitrateController.getChannel();
         SimulcastEngine simulcastEngine = channel.getTransformEngine().getSimulcastEngine();
-        if (simulcastEngine != null && simulcastEngine.getSimulcastSenderManager().getOverrideOrder() != SimulcastLayer.SIMULCAST_LAYER_ORDER_BASE)
+        if (simulcastEngine != null && simulcastEngine.getSimulcastSenderManager().getOverrideOrder() != SimulcastStream.SIMULCAST_LAYER_ORDER_BASE)
         {
             simulcastEngine.getSimulcastSenderManager().setOverrideOrder(
-                SimulcastLayer.SIMULCAST_LAYER_ORDER_BASE);
+                SimulcastStream.SIMULCAST_LAYER_ORDER_BASE);
 
             if (logger.isDebugEnabled())
             {
                 Endpoint self = channel.getEndpoint();
                 int numEndpointsThatFitIn
                     = bitrateController.calcNumEndpointsThatFitIn();
-                Map<String, Object> map
-                    = new HashMap<String, Object>(2);
+                Map<String, Object> map = new HashMap<>(2);
                 map.put("self", self);
                 map.put("numEndpointsThatFitIn", numEndpointsThatFitIn);
                 StringCompiler sc = new StringCompiler(map);

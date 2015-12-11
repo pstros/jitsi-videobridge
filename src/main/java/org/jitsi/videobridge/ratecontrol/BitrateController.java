@@ -271,7 +271,7 @@ public class BitrateController
                 SimulcastEngine simulcastEngine
                     = vc.getTransformEngine().getSimulcastEngine();
                 if (mySM != null && simulcastEngine != null
-                        && simulcastEngine.getSimulcastReceiver().hasLayers())
+                        && simulcastEngine.getSimulcastReceiver().isSimulcastSignaled())
                 {
                     // TODO we need a more general way for this
                 }
@@ -458,8 +458,7 @@ public class BitrateController
         /**
          * Maps a time of reception to a received value.
          */
-        private final Map<Long, Long> receivedRembs
-                = new HashMap<Long, Long>();
+        private final Map<Long, Long> receivedRembs = new HashMap<>();
 
         /**
          * The sum of all values in this list.
@@ -469,7 +468,7 @@ public class BitrateController
         /**
          * Used in {@link #clean(long)}.
          */
-        private final List<Long> toRemove = new ArrayList<Long>();
+        private final List<Long> toRemove = new ArrayList<>();
 
         /**
          * Initializes a new <tt>ReceivedRembList</tt> with the given period in
