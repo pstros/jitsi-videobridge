@@ -30,6 +30,7 @@ import net.java.sip.communicator.impl.protocol.jabber.extensions.jingle.*;
 
 import org.jitsi.impl.neomedia.*;
 import org.jitsi.impl.neomedia.rtcp.*;
+import org.jitsi.impl.neomedia.rtcp.termination.strategies.*;
 import org.jitsi.impl.neomedia.rtp.remotebitrateestimator.*;
 import org.jitsi.impl.neomedia.transform.*;
 import org.jitsi.service.configuration.*;
@@ -86,6 +87,12 @@ public class VideoChannel
      * instances to print debug information.
      */
     private static final Logger logger = Logger.getLogger(VideoChannel.class);
+
+    /**
+     * The payload type number configured for VP8 for this channel,
+     * or -1 if none is configured (the other end does not support VP8).
+     */
+    private byte vp8PayloadType = -1;
 
     /**
      * The <tt>SimulcastMode</tt> for this <tt>VideoChannel</tt>.
@@ -782,7 +789,7 @@ public class VideoChannel
             // added/removed/modified source group, same with payload types, etc)
             // This has implications in SSRC rewriting, we need to update our
             // engine.
-            logDebug("Handling CHANNEL_MODIFIED_PROPERTY_NAME");
+            logger.debug("Handling CHANNEL_MODIFIED_PROPERTY_NAME");
             VideoChannel videoChannel = (VideoChannel) ev.getNewValue();
             updateTranslatedVideoChannel(videoChannel);
         }
@@ -1296,12 +1303,18 @@ public class VideoChannel
         if (payloadTypes == null || payloadTypes.isEmpty())
             return;
 
+        vp8PayloadType = -1;
         for (PayloadTypePacketExtension payloadType : payloadTypes)
         {
             if (Constants.RED.equals(payloadType.getName()))
             {
                 enableRedFilter = false;
                 break;
+            }
+
+            if (Constants.VP8.equalsIgnoreCase(payloadType.getName()))
+            {
+                vp8PayloadType = (byte) payloadType.getID();
             }
         }
 
@@ -1324,7 +1337,7 @@ public class VideoChannel
 
         if (logger.isDebugEnabled())
         {
-            logDebug(
+            logger.debug(
                     "Received NACK on channel " + getID() +" for SSRC " + ssrc
                         + ". Packets reported lost: " + lostPackets);
         }
@@ -1360,7 +1373,7 @@ public class VideoChannel
                 {
                     if (logger.isDebugEnabled())
                     {
-                        logDebug(
+                        logger.debug(
                                 "Retransmitting packet from cache. SSRC " + ssrc
                                     + " seq " + seq);
                     }
@@ -1378,7 +1391,7 @@ public class VideoChannel
             {
                 // If retransmission requests are enabled, videobridge assumes
                 // the responsibility of requesting missing packets.
-                logDebug("Packets missing from the cache. Ignoring, because"
+                logger.debug("Packets missing from the cache. Ignoring, because"
                                      + " retransmission requests are enabled.");
             }
             else
@@ -1421,7 +1434,7 @@ public class VideoChannel
         }
         catch (IOException ioe)
         {
-            logWarn("Failed to create NACK packet: " + ioe);
+            logger.warn("Failed to create NACK packet: " + ioe);
         }
 
         if (pkt != null)
@@ -1455,7 +1468,7 @@ public class VideoChannel
             {
                 if (logger.isDebugEnabled())
                 {
-                    logDebug("Sending a NACK for SSRC " + mediaSourceSsrc
+                    logger.debug("Sending a NACK for SSRC " + mediaSourceSsrc
                                          + " , packets " + seqs
                                          + " on channel " + c.getID());
                 }
@@ -1469,7 +1482,7 @@ public class VideoChannel
                 }
                 catch (TransmissionFailedException e)
                 {
-                    logWarn("Failed to inject packet in MediaStream: " + e);
+                    logger.warn("Failed to inject packet in MediaStream: " + e);
                 }
             }
         }
@@ -1555,7 +1568,7 @@ public class VideoChannel
 
         if (logger.isDebugEnabled())
         {
-            logDebug("Setting simulcast mode to " + newSimulcastMode);
+            logger.debug("Setting simulcast mode to " + newSimulcastMode);
         }
 
         simulcastMode = newSimulcastMode;
@@ -1569,6 +1582,17 @@ public class VideoChannel
 
         firePropertyChange(
             SIMULCAST_MODE_PNAME, oldSimulcastMode, newSimulcastMode);
+    }
+
+    /**
+     * Returns the payload type number for the VP8 payload type for
+     * this channel.
+     * @return the payload type number for the VP8 payload type for
+     * this channel.
+     */
+    public byte getVP8PayloadType()
+    {
+        return vp8PayloadType;
     }
 
     /**
@@ -1587,12 +1611,12 @@ public class VideoChannel
      */
     public void updateTranslatedVideoChannels()
     {
-        logDebug("Updating the translated channels.");
+        logger.debug("Updating the translated channels.");
         for (Channel peerVideoChannel : getContent().getChannels())
         {
             if (!(peerVideoChannel instanceof VideoChannel))
             {
-                logWarn("Er, what? I Taw a Putty Tat.");
+                logger.warn("Er, what? I Taw a Putty Tat.");
                 continue;
             }
 
@@ -1610,14 +1634,14 @@ public class VideoChannel
     {
         if (peerVideoChannel == null)
         {
-            logWarn("Can't update our view of the peer video channel because " +
+            logger.warn("Can't update our view of the peer video channel because " +
                     "the peerVideoChannel is null.");
             return;
         }
 
         if (peerVideoChannel == this)
         {
-            logDebug("Won't update our view of the peer video channel because" +
+            logger.debug("Won't update our view of the peer video channel because" +
                     " peerVideoChannel is this.");
             return;
         }
@@ -1626,15 +1650,19 @@ public class VideoChannel
         {
             // FIXME Instead we should do something like this.
             // setSimulcastMode(SimulcastMode.REWRITING);
-            logWarn("Aborting: simulcast mode is not set, but it is required.");
+            logger.warn("Aborting: simulcast mode is not set, but it is required.");
             return;
         }
 
         // In the same spirit as MediaStreamImpl.update() but for signaling.
         if (simulcastMode != SimulcastMode.REWRITING)
         {
-            logDebug("Simulcast mode is not rewriting.");
+            logger.debug("Simulcast mode is not rewriting.");
+            return;
         }
+
+        // The rewriting mode requires SSRC rewriting, RTCP termination and NACK
+        // termination (packet caching and retransmission requests).
 
         // Update the SSRC rewriting engine from the peer simulcast engine
         // state.
@@ -1643,7 +1671,7 @@ public class VideoChannel
 
         if (sim == null)
         {
-            logDebug("Can't update our view of the peer video channel because" +
+            logger.debug("Can't update our view of the peer video channel because" +
                     " peerSimulcastEngine is null.");
             return;
         }
@@ -1653,12 +1681,12 @@ public class VideoChannel
 
         if (streams == null || streams.length == 0)
         {
-            logDebug("Can't update our view of the peer video channel because" +
+            logger.debug("Can't update our view of the peer video channel because" +
                     " the peer doesn't have any simulcast streams.");
             return;
         }
 
-        logDebug("Updating our view of the peer video channel.");
+        logger.debug("Updating our view of the peer video channel.");
         final Set<Integer> ssrcGroup = new HashSet<>();
         final Map<Integer, Integer> rtxGroups = new HashMap<>();
 
@@ -1715,25 +1743,29 @@ public class VideoChannel
             }
         }
 
-        getStream().configureSSRCRewriting(ssrcGroup, ssrcTargetPrimary,
+
+        MediaStream mediaStream = getStream();
+        mediaStream.configureSSRCRewriting(ssrcGroup, ssrcTargetPrimary,
             ssrc2fec, ssrc2red, rtxGroups, ssrcTargetRTX);
-    }
 
-    private void logDebug(String msg)
-    {
-        if (logger.isDebugEnabled())
+        // The rewriting mode requires RTCP termination.
+        RTCPTerminationStrategy oldStrategy
+            = mediaStream.getRTCPTerminationStrategy();
+        if (!(oldStrategy instanceof BasicRTCPTerminationStrategy))
         {
-            msg = getEndpoint().getID() + ": " + msg;
-            logger.debug(msg);
-        }
-    }
+            if (logger.isDebugEnabled())
+            {
+                logger.debug("Setting RTCP termination strategy to " +
+                    "BasicRTCPTerminationStrategy because it is required.");
+            }
 
-    private void logWarn(String msg)
-    {
-        if (logger.isWarnEnabled())
-        {
-            msg = getEndpoint().getID() + ": " + msg;
-            logger.warn(msg);
+            BasicRTCPTerminationStrategy
+                newStrategy = new BasicRTCPTerminationStrategy();
+            newStrategy.initialize(mediaStream);
+            mediaStream.setRTCPTerminationStrategy(newStrategy);
         }
+
+        // FIXME Force NACK termination. Postponing because this will require a
+        // few changes here and there, and it's enabled by default anyway.
     }
 }
