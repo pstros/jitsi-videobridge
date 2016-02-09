@@ -161,11 +161,6 @@
       <artifactId>libjitsi</artifactId>
       <version>1.0-RT-PERFORMANCE-SNAPSHOT</version>
     </dependency>
-    <dependency>
-      <groupId>${project.groupId}</groupId>
-      <artifactId>libjitsi</artifactId>
-      <version>1.0-20190329.124239-380</version>
-    </dependency>
 
     <dependency>
       <groupId>org.osgi</groupId>
