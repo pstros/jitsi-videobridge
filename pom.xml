@@ -158,8 +158,8 @@
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>
-      <artifactId>jitsi-utils</artifactId>
-      <version>1.0-20190329.111334-6</version>
+      <artifactId>libjitsi</artifactId>
+      <version>1.0-RT-PERFORMANCE-SNAPSHOT</version>
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>
