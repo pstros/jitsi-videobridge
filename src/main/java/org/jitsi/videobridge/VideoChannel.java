@@ -668,8 +668,28 @@ public class VideoChannel
             }
         }
 
-        if (this.inLastN.compareAndSet(!inLastN, inLastN))
-            inLastNChanged(!inLastN, inLastN);
+        setInLastN(inLastN);
+    }
+
+    /**
+     * Sets the value of the {@code inLastN} property to {@code newValue}.
+     * @param newValue the value to set.
+     */
+    void setInLastN(boolean newValue)
+    {
+        if (this.inLastN.compareAndSet(!newValue, newValue))
+        {
+            inLastNChanged(!newValue, newValue);
+        }
+    }
+
+    /**
+     * Updates the {@code inLastN} property of this {@link VideoChannel}.
+     */
+    void updateInLastN()
+    {
+        Channel[] channels = getContent().getChannels();
+        updateInLastN(channels);
     }
 
     /**
@@ -1025,7 +1045,8 @@ public class VideoChannel
         {
             // FIXME Instead we should do something like this.
             // setSimulcastMode(SimulcastMode.REWRITING);
-            logger.warn("Aborting: simulcast mode is not set, but it is required.");
+            logger.debug("Won't update our view of the peer video channel" +
+                    " because the simulcast mode is not set.");
             return;
         }
 
