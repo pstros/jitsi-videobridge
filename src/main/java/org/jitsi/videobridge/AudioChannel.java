@@ -47,7 +47,7 @@ public class AudioChannel
      * {@link AudioMediaStream#setStreamAudioLevelListener(
      * SimpleAudioLevelListener)} in order to have the audio levels of the
      * contributing sources calculated and to end enable the functionality of
-     * {@link #lastN}.
+     * {@code #lastN}.
      */
     private SimpleAudioLevelListener streamAudioLevelListener;
 
@@ -113,7 +113,7 @@ public class AudioChannel
      * {@link AudioMediaStream#setStreamAudioLevelListener(
      * SimpleAudioLevelListener)} in order to have the audio levels of the
      * contributing sources calculated and to enable the functionality of
-     * {@link #lastN}.
+     * {@code #lastN}.
      *
      * @return the <tt>SimpleAudioLevelListener</tt> instance
      */
@@ -304,5 +304,25 @@ public class AudioChannel
                         getCsrcAudioLevelListener());
             }
         }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    boolean rtpTranslatorWillWrite(
+        boolean data,
+        byte[] buffer, int offset, int length,
+        Channel source)
+    {
+        LipSyncHack lsHack = getEndpoint().getLipSyncHack();
+
+        if (lsHack != null)
+        {
+            getEndpoint().getLipSyncHack().onRTPTranslatorWillWriteAudio(
+                data, buffer, offset, length, source);
+        }
+
+        return true;
     }
 }

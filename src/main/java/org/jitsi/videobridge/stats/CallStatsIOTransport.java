@@ -23,6 +23,7 @@ import net.java.sip.communicator.util.Logger;
 import org.jitsi.service.configuration.*;
 import org.jitsi.service.version.*;
 import org.jitsi.util.*;
+import org.jitsi.videobridge.stats.callstats.*;
 import org.osgi.framework.*;
 
 /**
@@ -41,12 +42,27 @@ public class CallStatsIOTransport
     private static final Logger logger
         = Logger.getLogger(CallStatsIOTransport.class);
 
+    /**
+     * The callstats AppID.
+     */
     private static final String PNAME_CALLSTATS_IO_APP_ID
         = "io.callstats.sdk.CallStats.appId";
 
-    private static final String PNAME_CALLSTATS_IO_APP_SECRET
-        = "io.callstats.sdk.CallStats.appSecret";
+    /**
+     * ID of the key that was used to generate token.
+     */
+    private static final String PNAME_CALLSTATS_IO_KEY_ID
+        = "io.callstats.sdk.CallStats.keyId";
 
+    /**
+     * The path to private key file.
+     */
+    private static final String PNAME_CALLSTATS_IO_KEY_PATH
+        = "io.callstats.sdk.CallStats.keyPath";
+
+    /**
+     * The bridge id to report to callstats.io.
+     */
     private static final String PNAME_CALLSTATS_IO_BRIDGE_ID
         = "io.callstats.sdk.CallStats.bridgeId";
 
@@ -63,6 +79,11 @@ public class CallStatsIOTransport
      * The entry point into the callstats.io (Java) library.
      */
     private CallStats callStats;
+
+    /**
+     * CallStats service registration.
+     */
+    private ServiceRegistration<CallStats> serviceRegistration;
 
     /**
      * {@inheritDoc}
@@ -108,6 +129,12 @@ public class CallStatsIOTransport
      */
     private void callStatsOnInitialized(CallStats callStats, String msg)
     {
+        // callstats get re-initialized every few hours, which
+        // can leads to registering callstats in osgi many times, while
+        // the service instance is the same
+        if(serviceRegistration != null)
+            return;
+
         bridgeStatusInfoBuilder = new BridgeStatusInfoBuilder();
 
         if (logger.isDebugEnabled())
@@ -116,6 +143,12 @@ public class CallStatsIOTransport
                     "callstats.io Java library initialized successfully"
                         + " with message: " + msg);
         }
+
+        serviceRegistration
+            = getBundleContext().registerService(
+                    CallStats.class,
+                    callStats,
+                    null);
     }
 
     /**
@@ -160,6 +193,12 @@ public class CallStatsIOTransport
      */
     private void dispose(BundleContext bundleContext)
     {
+        if (serviceRegistration != null)
+        {
+            serviceRegistration.unregister();
+            serviceRegistration = null;
+        }
+
         bridgeStatusInfoBuilder = null;
         callStats = null;
     }
@@ -195,8 +234,18 @@ public class CallStatsIOTransport
     private void init(BundleContext bundleContext, ConfigurationService cfg)
     {
         int appId = ConfigUtils.getInt(cfg, PNAME_CALLSTATS_IO_APP_ID, 0);
-        String appSecret
-            = ConfigUtils.getString(cfg, PNAME_CALLSTATS_IO_APP_SECRET, null);
+        String keyId
+            = ConfigUtils.getString(cfg, PNAME_CALLSTATS_IO_KEY_ID, null);
+        String keyPath
+            = ConfigUtils.getString(cfg, PNAME_CALLSTATS_IO_KEY_PATH, null);
+
+        if(keyId == null || keyPath == null)
+        {
+            logger.warn(
+                "KeyID and keyPath missing, now skipping callstats init");
+            return;
+        }
+
         String bridgeId
             = ConfigUtils.getString(cfg, PNAME_CALLSTATS_IO_BRIDGE_ID, null);
         ServerInfo serverInfo = createServerInfo(bundleContext);
@@ -211,7 +260,8 @@ public class CallStatsIOTransport
 
         callStats.initialize(
                 appId,
-                appSecret,
+                new TokenGenerator(
+                    String.valueOf(appId), keyId, bridgeId, keyPath),
                 bridgeId,
                 serverInfo,
                 new CallStatsInitListener()
@@ -254,8 +304,10 @@ public class CallStatsIOTransport
     {
         bsib.audioFabricCount(
                 s.getStatAsInt(VideobridgeStatistics.AUDIOCHANNELS));
-        // TODO avgIntervalJitter
-        // TODO avgIntervalRtt
+        bsib.avgIntervalJitter(
+            s.getStatAsInt(VideobridgeStatistics.JITTER_AGGREGATE));
+        bsib.avgIntervalRtt(
+            s.getStatAsInt(VideobridgeStatistics.RTT_AGGREGATE));
         bsib.conferenceCount(s.getStatAsInt(VideobridgeStatistics.CONFERENCES));
         bsib.cpuUsage(
                 (float) s.getStatAsDouble(VideobridgeStatistics.CPU_USAGE));
@@ -265,8 +317,10 @@ public class CallStatsIOTransport
                             s.getStatAsDouble(
                                     VideobridgeStatistics.BITRATE_DOWNLOAD)));
         // TODO intervalReceivedBytes
+        // uses download loss rate, as the upload is not properly measured
+        // currently and vary a lot, which also breaks RTP_LOSS value.
         bsib.intervalRtpFractionLoss(
-                (float) s.getStatAsDouble(VideobridgeStatistics.RTP_LOSS));
+            (float)s.getStatAsDouble(VideobridgeStatistics.LOSS_RATE_DOWNLOAD));
         // TODO intervalSentBytes
         bsib.intervalUploadBitRate(
                 (int)
@@ -305,7 +359,7 @@ public class CallStatsIOTransport
             long measurementInterval)
     {
         // Queuing is not implemented by CallStats at the time of this writing.
-        if (callStats.isInitialized())
+        if (callStats != null && callStats.isInitialized())
         {
             BridgeStatusInfoBuilder bridgeStatusInfoBuilder
                 = this.bridgeStatusInfoBuilder;

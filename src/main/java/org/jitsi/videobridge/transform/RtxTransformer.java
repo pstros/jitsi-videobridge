@@ -19,17 +19,14 @@ import java.util.*;
 import org.jitsi.impl.neomedia.*;
 import org.jitsi.impl.neomedia.transform.*;
 import org.jitsi.service.neomedia.*;
-import org.jitsi.service.neomedia.rtp.*;
 import org.jitsi.util.*;
 import org.jitsi.videobridge.*;
 
 /**
- * Intercepts and handles outgoing RTX (RFC-4588) packets for an
- * <tt>RtpChannel</tt>. Depending on whether the destination supports the RTX
- * format (RFC-4588) either removes the RTX encapsulation (thus effectively
- * retransmitting packets bit-by-bit) or updates the sequence number and SSRC
- * fields taking into account the data sent to the particular
- * <tt>RtpChannel</tt>.
+ * Intercepts RTX (RFC-4588) packets coming from an {@link RtpChannel}, and
+ * removes their RTX encapsulation.
+ * Allows packets to be retransmitted to a channel (using the RTX format if
+ * the destination supports it).
  *
  * @author Boris Grozev
  */
@@ -38,10 +35,12 @@ public class RtxTransformer
     implements TransformEngine
 {
     /**
-     * The <tt>Logger</tt> used by the <tt>RtxTransformer</tt> class and its
-     * instances to print debug information.
+     * The {@link Logger} used by the {@link RtxTransformer} class to print
+     * debug information. Note that {@link Conference} instances should use
+     * {@link #logger} instead.
      */
-    private static final Logger logger = Logger.getLogger(RtxTransformer.class);
+    private static final Logger classLogger
+        = Logger.getLogger(RtxTransformer.class);
 
     /**
      * The <tt>RtpChannel</tt> for the transformer.
@@ -54,6 +53,12 @@ public class RtxTransformer
     private final Map<Long, Integer> rtxSequenceNumbers = new HashMap<>();
 
     /**
+     * The {@link Logger} to be used by this instance to print debug
+     * information.
+     */
+    private final Logger logger;
+
+    /**
      * Initializes a new <tt>RtxTransformer</tt> with a specific
      * <tt>RtpChannel</tt>.
      *
@@ -61,7 +66,13 @@ public class RtxTransformer
      */
     RtxTransformer(RtpChannel channel)
     {
+        super(RTPPacketPredicate.INSTANCE);
+
         this.channel = channel;
+        this.logger
+            = Logger.getLogger(
+                    classLogger,
+                    channel.getContent().getConference().getLogger());
     }
 
     /**
@@ -69,105 +80,83 @@ public class RtxTransformer
      * {@inheritDoc}
      */
     @Override
-    public RawPacket transform(RawPacket pkt)
+    public RawPacket reverseTransform(RawPacket pkt)
     {
-        byte rtxPt;
-        if (pkt != null && (rtxPt = channel.getRtxPayloadType()) != -1
-            && pkt.getPayloadType() == rtxPt)
+        if (isRtx(pkt))
         {
-            pkt = handleRtxPacket(pkt);
+            pkt = deRtx(pkt);
         }
 
         return pkt;
     }
 
     /**
-     * Handles an RTX packet and returns it.
-     * @param pkt the packet to handle.
-     * @return the packet
+     * Determines whether {@code pkt} is an RTX packet.
+     * @param pkt the packet to check.
+     * @return {@code true} iff {@code pkt} is an RTX packet.
      */
-    private RawPacket handleRtxPacket(RawPacket pkt)
+    private boolean isRtx(RawPacket pkt)
     {
-        boolean destinationSupportsRtx = channel.getRtxPayloadType() != -1;
-        RawPacket mediaPacket = createMediaPacket(pkt);
-
-        if (mediaPacket != null)
-        {
-            RawPacketCache cache = channel.getStream().getPacketCache();
-            if (cache != null)
-            {
-                cache.cachePacket(mediaPacket);
-            }
-        }
-
-        if (destinationSupportsRtx)
-        {
-            pkt.setSequenceNumber(
-                    getNextRtxSequenceNumber(
-                            pkt.getSSRC() & 0xffffffffL,
-                            pkt.getSequenceNumber()));
-        }
-        else
-        {
-            // If the media packet was not reconstructed, drop the RTX packet
-            // (by returning null).
-            return mediaPacket;
-        }
-
-        return pkt;
+        byte rtxPt = channel.getRtxPayloadType();
+        return rtxPt != -1 && rtxPt == pkt.getPayloadType();
     }
 
     /**
-     * Creates a {@code RawPacket} which represents the original packet
-     * encapsulated in {@code pkt} using the RTX format.
-     * @param pkt the packet from which to extract a media packet.
-     * @return the extracted media packet.
+     * Removes the RTX encapsulation from a packet.
+     * @param pkt the packet to remove the RTX encapsulation from.
+     * @return the original media packet represented by {@code pkt}, or null if
+     * we couldn't reconstruct the original packet.
      */
-    private RawPacket createMediaPacket(RawPacket pkt)
+    private RawPacket deRtx(RawPacket pkt)
     {
-        RawPacket mediaPacket = null;
-        long rtxSsrc = pkt.getSSRC() & 0xffffffffL;
+        boolean success = false;
+        long rtxSsrc = pkt.getSSRCAsLong();
 
-        // We need to know the SSRC paired with rtxSsrc *as seen by the
-        // receiver (i.e. this.channel)*. However, we only store SSRCs
-        // that endpoints *send* with.
-        // We therefore assume that SSRC re-writing has not introduced any
-        // new SSRCs and therefor the FID mappings known to the senders
-        // also apply to receivers.
-        RtpChannel sourceChannel
-                = channel.getContent().findChannelByFidSsrc(rtxSsrc);
-        if (sourceChannel != null)
+        if (pkt.getPayloadLength() - pkt.getPaddingSize() < 2)
         {
-            long mediaSsrc = sourceChannel.getFidPairedSsrc(rtxSsrc);
-            if (mediaSsrc != -1)
+            // We need at least 2 bytes to read the OSN field.
+            if (logger.isDebugEnabled())
             {
-                byte apt = sourceChannel.getRtxAssociatedPayloadType();
-                if (apt != -1)
-                {
-                    mediaPacket = new RawPacket(pkt.getBuffer().clone(),
-                                                pkt.getOffset(),
-                                                pkt.getLength());
+                logger.debug(
+                    "Dropping an incoming RTX packet with padding only: " + pkt);
+            }
+            return null;
+        }
 
-                    // Remove the RTX header by moving the RTP header two bytes
-                    // right.
-                    byte[] buf = mediaPacket.getBuffer();
-                    int off = mediaPacket.getOffset();
-                    System.arraycopy(buf, off,
-                                     buf, off + 2,
-                                     mediaPacket.getHeaderLength());
+        long mediaSsrc = channel.getFidPairedSsrc(rtxSsrc);
+        if (mediaSsrc != -1)
+        {
+            byte apt = channel.getRtxAssociatedPayloadType();
+            if (apt != -1)
+            {
+                int osn = pkt.getOriginalSequenceNumber();
+                // Remove the RTX header by moving the RTP header two bytes
+                // right.
+                byte[] buf = pkt.getBuffer();
+                int off = pkt.getOffset();
+                System.arraycopy(buf, off,
+                                 buf, off + 2,
+                                 pkt.getHeaderLength());
 
-                    mediaPacket.setOffset(off + 2);
-                    mediaPacket.setLength(pkt.getLength() - 2);
+                pkt.setOffset(off + 2);
+                pkt.setLength(pkt.getLength() - 2);
 
-                    mediaPacket.setSSRC((int) mediaSsrc);
-                    mediaPacket.setSequenceNumber(
-                            pkt.getOriginalSequenceNumber());
-                    mediaPacket.setPayloadType(apt);
-                }
+                pkt.setSSRC((int) mediaSsrc);
+                pkt.setSequenceNumber(osn);
+                pkt.setPayloadType(apt);
+                success = true;
+            }
+            else
+            {
+                logger.warn(
+                    "RTX packet received, but no APT is defined. Packet "
+                        + "SSRC " + rtxSsrc + ", associated media SSRC "
+                        + mediaSsrc);
             }
         }
 
-        return mediaPacket;
+        // If we failed to handle the RTX packet, drop it.
+        return success ? pkt : null;
     }
 
     /**
@@ -198,19 +187,17 @@ public class RtxTransformer
      * each SSRC.
      *
      * @param ssrc the SSRC of the RTX stream for the packet.
-     * @param defaultSeq the default sequence number to use in case we don't
-     * (yet) have any information about <tt>ssrc</tt>.
      * @return the sequence number which should be used for the next RTX
      * packet sent using SSRC <tt>ssrc</tt>.
      */
-    private int getNextRtxSequenceNumber(long ssrc, int defaultSeq)
+    private int getNextRtxSequenceNumber(long ssrc)
     {
         Integer seq;
         synchronized (rtxSequenceNumbers)
         {
             seq = rtxSequenceNumbers.get(ssrc);
             if (seq == null)
-                seq = defaultSeq;
+                seq = new Random().nextInt(0xffff);
             else
                 seq++;
 
@@ -218,17 +205,6 @@ public class RtxTransformer
         }
 
         return seq;
-    }
-
-    /**
-     * Returns the next RTP sequence number to use for the RTX stream for a
-     * particular SSRC.
-     * @param ssrc the SSRC.
-     * @return the next sequence number to use for SSRC <tt>ssrc</tt>.
-     */
-    private int getNextRtxSequenceNumber(long ssrc)
-    {
-        return getNextRtxSequenceNumber(ssrc, new Random().nextInt(1 << 16));
     }
 
     /**
@@ -267,16 +243,18 @@ public class RtxTransformer
 
         if (destinationSupportsRtx)
         {
-            long rtxSsrc = getPairedSsrc(pkt.getSSRC());
+            long rtxSsrc = getPairedSsrc(pkt.getSSRCAsLong());
 
             if (rtxSsrc == -1)
             {
-                logger.warn("Cannot find SSRC for RTX, retransmitting plain.");
+                logger.warn("Cannot find SSRC for RTX, retransmitting plain. "
+                            + "SSRC=" + pkt.getSSRCAsLong());
                 retransmitPlain = true;
             }
             else
             {
-                retransmitPlain = !encapsulateInRtxAndTransmit(pkt, rtxSsrc);
+                retransmitPlain
+                    = !encapsulateInRtxAndTransmit(pkt, rtxSsrc, after);
             }
         }
         else
@@ -311,49 +289,52 @@ public class RtxTransformer
      * {@code MediaStream}.
      * @param pkt the packet to transmit.
      * @param rtxSsrc the SSRC for the RTX stream.
+     * @param after the {@code TransformEngine} in the chain of
+     * {@code TransformEngine}s of the associated {@code MediaStream} after
+     * which the injection of {@code pkt} is to begin
      * @return {@code true} if the packet was successfully retransmitted,
      * {@code false} otherwise.
      */
-    private boolean encapsulateInRtxAndTransmit(RawPacket pkt, long rtxSsrc)
+    private boolean encapsulateInRtxAndTransmit(
+        RawPacket pkt, long rtxSsrc, TransformEngine after)
     {
         byte[] buf = pkt.getBuffer();
         int len = pkt.getLength();
         int off = pkt.getOffset();
-        byte[] newBuf = buf;
-        if (buf.length < len + 2)
-        {
-            // FIXME The byte array newly allocated and assigned to newBuf must
-            // be made known to pkt eventually.
-            newBuf = new byte[len + 2];
-        }
+
+        byte[] newBuf = new byte[len + 2];
+        RawPacket rtxPkt = new RawPacket(newBuf, 0, len + 2);
 
         int osn = pkt.getSequenceNumber();
         int headerLength = pkt.getHeaderLength();
-        int payloadLength = len - headerLength;
+        int payloadLength = pkt.getPayloadLength();
+
+        // Copy the header.
         System.arraycopy(buf, off, newBuf, 0, headerLength);
-        // FIXME If newBuf is actually buf, then we will override the first two
-        // bytes of the payload bellow.
+
+        // Set the OSN field.
         newBuf[headerLength] = (byte) ((osn >> 8) & 0xff);
         newBuf[headerLength + 1] = (byte) (osn & 0xff);
+
+        // Copy the payload.
         System.arraycopy(buf, off + headerLength,
                          newBuf, headerLength + 2,
                          payloadLength );
-        // FIXME We tried to extend the payload of pkt by two bytes above but
-        // we never told pkt that its length has increased by these two bytes.
 
         MediaStream mediaStream = channel.getStream();
         if (mediaStream != null)
         {
-            pkt.setSSRC((int) rtxSsrc);
+            rtxPkt.setSSRC((int) rtxSsrc);
+            rtxPkt.setPayloadType(channel.getRtxPayloadType());
             // Only call getNextRtxSequenceNumber() when we're sure we're going
             // to transmit a packet, because it consumes a sequence number.
-            pkt.setSequenceNumber(getNextRtxSequenceNumber(rtxSsrc));
+            rtxPkt.setSequenceNumber(getNextRtxSequenceNumber(rtxSsrc));
             try
             {
                 mediaStream.injectPacket(
-                        pkt,
+                        rtxPkt,
                         /* data */ true,
-                        /* after */ null);
+                        after);
             }
             catch (TransmissionFailedException tfe)
             {

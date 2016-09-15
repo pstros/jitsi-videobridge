@@ -94,19 +94,26 @@ public class SimulcastSenderManager
     public void setOverrideOrder(int overrideOrder)
     {
        this.overrideOrder = overrideOrder;
+        synchronized (this)
+        {
+            for (SimulcastSender sender : senders.values())
+            {
+                sender.overrideOrderChanged();
+            }
+        }
     }
 
     /**
-     * Returns a boolean indicating whether the caller must drop, or accept, the
-     * packet passed in as a parameter.
+     * Determines whether the caller must drop or accept a specific
+     * {@code RawPacket}.
      *
      * @param pkt the packet to drop or accept.
-     * @return true if the packet is to be accepted, false otherwise.
+     * @return {@code true} to accept {@code pkt}; {@code false}, otherwise.
      */
     public boolean accept(RawPacket pkt)
     {
-        // Find the associated <tt>SimulcastReceiver</tt> and make sure it
-        // receives simulcast, otherwise return the input packet as is.
+        // Find the associated SimulcastReceiver and make sure it receives
+        // simulcast; otherwise, return the input packet as is.
         int ssrc = pkt.getSSRC();
         SimulcastReceiver simulcastReceiver = getSimulcastReceiver(ssrc);
 
@@ -124,42 +131,67 @@ public class SimulcastSenderManager
         return simulcastSender != null && simulcastSender.accept(pkt);
     }
 
-    /**
-     * Determines which simulcast simulcast stream from the srcVideoChannel is
-     * currently being received by this video channel.
-     *
-     * @param simulcastReceiver
-     * @return
-     */
     private synchronized SimulcastSender getOrCreateSimulcastSender(
         SimulcastReceiver simulcastReceiver)
     {
-        if (simulcastReceiver == null || !simulcastReceiver.isSimulcastSignaled())
+        if (simulcastReceiver == null)
         {
             return null;
         }
 
-        SimulcastSender simulcastSender;
-        if (!this.senders.containsKey(simulcastReceiver))
+        SimulcastStream[] simulcastStreams
+            = simulcastReceiver.getSimulcastStreams();
+
+        if (simulcastStreams == null || simulcastStreams.length == 0)
         {
+            // This is equivalent to !simulcastReceiver.isSimulcastSignaled() in
+            // which case we don't want to create a SimulcastSender. The reason
+            // why we don't call the isSimulcastSignaled method is because we
+            // might need a reference to the simulcastStreams later on.
+            return null;
+        }
+
+        SimulcastSender simulcastSender = senders.get(simulcastReceiver);
+
+        if (simulcastSender == null) // Create a new sender.
+        {
+            VideoChannel videoChannel = simulcastEngine.getVideoChannel();
+            int targetOrder = videoChannel.getReceiveSimulcastLayer();
+
+            Endpoint sendingEndpoint = simulcastReceiver
+                .getSimulcastEngine()
+                .getVideoChannel()
+                .getEndpoint();
+
+            Endpoint receivingEndpoint = videoChannel.getEndpoint();
+
+            if (receivingEndpoint != null && sendingEndpoint != null)
+            {
+                Set<Endpoint> selectedEndpoints
+                    = receivingEndpoint.getSelectedEndpoints(); // never null.
+
+                if (selectedEndpoints.contains(sendingEndpoint))
+                {
+                    targetOrder = simulcastStreams.length - 1;
+                }
+            }
+
             // Create a new sender.
-            simulcastSender = new SimulcastSender(this, simulcastReceiver);
+            simulcastSender = new SimulcastSender(
+                    this,
+                    simulcastReceiver,
+                    targetOrder);
 
             // TODO remove stuff from the map (not strictly necessary as they'll
             // get garbage collected).
-            this.senders.put(simulcastReceiver, simulcastSender);
-        }
-        else
-        {
-            // Get the receiver that handles this peer simulcast
-            // manager
-            simulcastSender = this.senders.get(simulcastReceiver);
+            senders.put(simulcastReceiver, simulcastSender);
         }
 
         return simulcastSender;
     }
 
     /**
+     *
      * @param ssrc
      * @return
      */
@@ -171,8 +203,7 @@ public class SimulcastSenderManager
 
         if (!(channel instanceof VideoChannel))
         {
-            // This line should be unreachable, in other words, this is a nice
-            // place to add a Tetris launcher.
+            // Should never happen.
             return null;
         }
 
@@ -184,4 +215,29 @@ public class SimulcastSenderManager
                     .getSimulcastEngine()
                         .getSimulcastReceiver();
     }
+
+    /**
+     * @return the highest "target order" of the senders of this {@link
+     * SimulcastSenderManager}, whose highest stream is currently streaming.
+     */
+    public synchronized int getHighestStreamingTargetOrder()
+    {
+        int max = -1;
+
+        for (Map.Entry<SimulcastReceiver, SimulcastSender> entry
+                : senders.entrySet())
+        {
+            int senderTargetOrder = entry.getValue().getTargetOrder();
+            if (senderTargetOrder >= max)
+            {
+                SimulcastStream ss
+                    = entry.getKey().getSimulcastStream(senderTargetOrder);
+                if (ss != null && ss.isStreaming())
+                    max = senderTargetOrder;
+            }
+        }
+
+        return max;
+    }
+
 }

@@ -39,10 +39,11 @@ public class SimulcastSender
     implements PropertyChangeListener
 {
     /**
-     * The <tt>Logger</tt> used by the <tt>ReceivingStreams</tt> class and its
-     * instances to print debug information.
+     * The {@link Logger} used by the {@link SimulcastSender} class to print
+     * debug information. Note that instances should use {@link #logger}
+     * instead.
      */
-    private static final Logger logger
+    private static final Logger classLogger
         = Logger.getLogger(SimulcastSender.class);
 
     /**
@@ -78,17 +79,8 @@ public class SimulcastSender
 
     /**
      * The simulcast target order for this <tt>SimulcastSender</tt>.
-     *
-     * XXX Defaulting to the lowest-quality simulcast stream until we are
-     * explicitly told to switch to a higher-quality simulcast stream is one way
-     * to go, of course. But such a default presents the problem that a remote
-     * peer will see the lowest quality possible for a noticeably long period of
-     * time because its command to switch to the highest quality possible can
-     * only come via its data/SCTP channel and that may take a very (and
-     * unpredictably) long time to set up. That is why we may default to the
-     * highest-quality simulcast stream here.
      */
-    private int targetOrder = SimulcastStream.SIMULCAST_LAYER_ORDER_BASE; // Integer.MAX_VALUE;
+    private int targetOrder;
 
     /**
      * Indicates whether this <tt>SimulcastSender</tt> has been initialized or
@@ -96,7 +88,13 @@ public class SimulcastSender
      */
     private boolean initialized = false;
 
-     /**
+    /**
+     * The {@link Logger} to be used by this instance to print debug
+     * information.
+     */
+    private final Logger logger;
+
+    /**
      * Ctor.
      *
      * @param simulcastSenderManager the <tt>SimulcastSender</tt> that owns this
@@ -105,13 +103,27 @@ public class SimulcastSender
      */
     public SimulcastSender(
         SimulcastSenderManager simulcastSenderManager,
-        SimulcastReceiver simulcastReceiver)
+        SimulcastReceiver simulcastReceiver,
+        int targetOrder)
     {
         this.simulcastSenderManager = simulcastSenderManager;
 
         // We don't own the receiver, keep a weak reference so that it can be
         // garbage collected.
         this.weakSimulcastReceiver = new WeakReference<>(simulcastReceiver);
+        this.targetOrder = targetOrder;
+        this.logger
+            = Logger.getLogger(
+                    classLogger,
+                    simulcastSenderManager.getSimulcastEngine().getLogger());
+    }
+
+    /**
+     * @return the target order of this {@link SimulcastSender}.
+     */
+    public int getTargetOrder()
+    {
+        return targetOrder;
     }
 
     /**
@@ -230,23 +242,6 @@ public class SimulcastSender
         return sendEndpoint;
     }
 
-    private void react(boolean urgent)
-    {
-        SendMode sm = sendMode;
-        if (sm == null)
-        {
-            // This should never happen.
-            return;
-        }
-
-        // FIXME the urgent parameter is useless, this method can determine
-        // whether or not this is an urgent switch.
-        SimulcastStream closestMatch
-            = getSimulcastReceiver().getSimulcastStream(targetOrder);
-
-        sm.receive(closestMatch, urgent);
-    }
-
     /**
      * {@inheritDoc}
      *
@@ -259,10 +254,10 @@ public class SimulcastSender
 
         if (Endpoint.SELECTED_ENDPOINT_PROPERTY_NAME.equals(propertyName))
         {
-            Endpoint oldEndpoint = (Endpoint) ev.getOldValue();
-            Endpoint newEndpoint = (Endpoint) ev.getNewValue();
+            Set<Endpoint> oldEndpoints = (Set<Endpoint>) ev.getOldValue();
+            Set<Endpoint> newEndpoints = (Set<Endpoint>) ev.getNewValue();
 
-            selectedEndpointChanged(oldEndpoint, newEndpoint);
+            selectedEndpointChanged(oldEndpoints, newEndpoints);
         }
         else if (VideoChannel.SIMULCAST_MODE_PNAME.equals(propertyName))
         {
@@ -287,20 +282,29 @@ public class SimulcastSender
 
     /**
      * Handles a change in the selected endpoint.
-     * @param oldEndpoint the old selected endpoint.
-     * @param newEndpoint the new selected endpoint.
+     * @param oldEndpoints Set of the old selected endpoints.
+     * @param newEndpoints Set of the new selected endpoints.
      */
     private void selectedEndpointChanged(
-            Endpoint oldEndpoint, Endpoint newEndpoint)
+            Set<Endpoint> oldEndpoints, Set<Endpoint> newEndpoints)
     {
         // Here we update the targetOrder value.
 
         if (logger.isDebugEnabled())
         {
-            if (newEndpoint == null)
+            if (newEndpoints.isEmpty())
                 logger.debug("Now I'm not watching anybody. What?!");
             else
-                logger.debug("Now I'm watching " + newEndpoint.getID());
+            {
+                StringBuilder newEndpointsIDList = new StringBuilder();
+                for (Endpoint e : newEndpoints)
+                {
+                    newEndpointsIDList.append(e.getID());
+                    newEndpointsIDList.append(", ");
+                }
+                logger.debug(getReceiveEndpoint().getID() + " now I'm watching: "
+                        + newEndpointsIDList.toString());
+            }
         }
 
         SimulcastReceiver simulcastReceiver = getSimulcastReceiver();
@@ -324,29 +328,74 @@ public class SimulcastSender
         Endpoint sendEndpoint = getSendEndpoint();
         // Send LQ stream for the previously selected endpoint.
         int lqOrder = SimulcastStream.SIMULCAST_LAYER_ORDER_BASE;
+        int hqOrder = simStreams.length - 1;
         // XXX Practically, we should react once anyway. But since we have to if
         // statements, it is technically possible to react twice. Which is
         // unnecessary.
+
+        int newTargetOrder;
         int oldTargetOrder = targetOrder;
 
-        if (oldEndpoint == sendEndpoint && targetOrder != lqOrder)
-            targetOrder = lqOrder;
+        boolean thisWasInTheSelectedEndpoints
+                = oldEndpoints.contains(sendEndpoint);
+        boolean thisWillBeInTheSelectedEndpoints
+                = newEndpoints.contains(sendEndpoint);
 
-        int hqOrder = simStreams.length - 1;
+        if (thisWillBeInTheSelectedEndpoints)
+        {
+            int overrideOrder = getSimulcastSenderManager().getOverrideOrder();
+            if (overrideOrder
+                    == SimulcastSenderManager.SIMULCAST_LAYER_ORDER_NO_OVERRIDE)
+            {
+                newTargetOrder = hqOrder;
+            }
+            else
+            {
+                newTargetOrder = Math.min(hqOrder, overrideOrder);
+            }
+        }
+        else if(thisWasInTheSelectedEndpoints)
+        {
+            // It was in the old selected endpoints but it is not present in the
+            // new ones
+            newTargetOrder = lqOrder;
+        }
+        else
+        {
+            newTargetOrder = oldTargetOrder;
+        }
 
-        if (newEndpoint == sendEndpoint && targetOrder != hqOrder)
-            targetOrder = hqOrder;
+        if (logger.isDebugEnabled())
+        {
+            logger.debug(getReceiveEndpoint().getID() + "/" +
+                getSendEndpoint().getID() + " old endpoints: " + oldEndpoints);
+            logger.debug(getReceiveEndpoint().getID() + "/" +
+                getSendEndpoint().getID() + " new endpoints: " + newEndpoints);
+            logger.debug(getReceiveEndpoint().getID() + "/" +
+                getSendEndpoint().getID() + " oldTargetOrder=" + oldTargetOrder);
+            logger.debug(getReceiveEndpoint().getID() + "/" +
+                getSendEndpoint().getID() + " newTargetOrder=" + newTargetOrder);
+        }
 
-        if (oldTargetOrder != targetOrder)
-            react(false);
+
+        if (oldTargetOrder != newTargetOrder)
+        {
+            targetOrder = newTargetOrder;
+
+            SendMode sm = this.sendMode;
+            if (sm != null)
+            {
+                this.sendMode.receive(newTargetOrder);
+            }
+        }
     }
 
     /**
-     * Returns a boolean indicating whether the caller must drop, or accept, the
-     * packet passed in as a parameter.
+     * Determines whether the caller must drop or accept a specific
+     * {@code RawPacket}.
      *
-     * @param pkt the <tt>RawPacket</tt> that needs to be accepted or dropped.
-     * @return true if the packet is to be accepted, false otherwise.
+     * @param pkt the <tt>RawPacket</tt> to accept or drop.
+     * @return {@code true} to accept {@code pkt}; {@code false}, otherwise.
      */
     public boolean accept(RawPacket pkt)
     {
@@ -355,7 +404,7 @@ public class SimulcastSender
             return false;
         }
 
-        this.assertInitialized();
+        assertInitialized();
 
         if (sendMode == null)
         {
@@ -383,27 +432,25 @@ public class SimulcastSender
         SimulcastReceiver simulcastReceiver = getSimulcastReceiver();
 
         // We want to be notified when the simulcast streams of the sending
-        // endpoint change. It will wall the {#receiveStreamsChanged()} method.
+        // endpoint change. It will call the receiveStreamsChanged() method.
         simulcastReceiver.addWeakListener(
-            new WeakReference<>(simulcastReceiverListener));
+                new WeakReference<>(simulcastReceiverListener));
 
-        // Manually trigger the {#receiveStreamsChanged()} method so that w
-        // Initialize the send mode.
-        SimulcastMode simulcastMode = getSimulcastSenderManager()
-            .getSimulcastEngine().getVideoChannel().getSimulcastMode();
+        // Manually trigger the receiveStreamsChanged() method so that we
+        // initialize the send mode.
+        VideoChannel sendVideoChannel
+            = getSimulcastSenderManager().getSimulcastEngine().getVideoChannel();
+        SimulcastMode simulcastMode = sendVideoChannel.getSimulcastMode();
 
         sendModeChanged(simulcastMode, null);
 
-        VideoChannel sendVideoChannel = getSimulcastSenderManager()
-            .getSimulcastEngine().getVideoChannel();
-        // We want to be notified and react when the simulcast mode of the
-        // send-<tt>VideoChannel</tt> changes.
+        // We want to be notified and react when the simulcast mode of the send
+        // VideoChannel changes.
         sendVideoChannel.addPropertyChangeListener(propertyChangeListener);
 
         // We want to be notified and react when the selected endpoint has
         // changed at the client.
-        Endpoint receiveEndpoint = getReceiveEndpoint();
-        receiveEndpointChanged(receiveEndpoint, null);
+        receiveEndpointChanged(getReceiveEndpoint(), null);
     }
 
     /**
@@ -421,17 +468,21 @@ public class SimulcastSender
         {
             // Now, why would you want to do that?
             sendMode = null;
+            logger.debug("Setting simulcastMode to null.");
+            return;
         }
         else if (newMode == SimulcastMode.REWRITING)
         {
+            logger.debug("Setting simulcastMode to rewriting mode.");
             sendMode = new RewritingSendMode(this);
         }
         else if (newMode == SimulcastMode.SWITCHING)
         {
+            logger.debug("Setting simulcastMode to switching mode.");
             sendMode = new SwitchingSendMode(this);
         }
 
-        react(false);
+        this.sendMode.receive(targetOrder);
     }
 
     /**
@@ -458,6 +509,33 @@ public class SimulcastSender
             // Not strictly necessary since we're using a
             // WeakReferencePropertyChangeListener but why not.
             oldValue.removePropertyChangeListener(propertyChangeListener);
+        }
+    }
+
+    /**
+     * Notifies this instance that the overrider order of the parent
+     * {@link SimulcastSenderManager} has changed.
+     *
+     */
+    void overrideOrderChanged()
+    {
+        // FIXME: this may not be thread safe. Making it thread safe, though,
+        // requires changes to the whole class.
+
+        int overrideOrder = getSimulcastSenderManager().getOverrideOrder();
+        // FIXME: this only drop the target order if the override is low. If
+        // doesn't support clearing the override order (for this, we need to
+        // reevaluate the list of selected endpoints).
+        if (overrideOrder
+            != SimulcastSenderManager.SIMULCAST_LAYER_ORDER_NO_OVERRIDE)
+        {
+            targetOrder = Math.min(targetOrder, overrideOrder);
+
+            SendMode sm = this.sendMode;
+            if (sm != null)
+            {
+                this.sendMode.receive(targetOrder);
+            }
         }
     }
 
@@ -493,17 +571,7 @@ public class SimulcastSender
                 return;
             }
 
-            boolean isUrgent = false;
-            for (SimulcastStream l : simulcastStreams)
-            {
-                isUrgent = l == sm.getCurrent() && !l.isStreaming();
-                if (isUrgent)
-                {
-                    break;
-                }
-            }
-
-            react(isUrgent);
+            sm.receive(targetOrder);
         }
     }
 }

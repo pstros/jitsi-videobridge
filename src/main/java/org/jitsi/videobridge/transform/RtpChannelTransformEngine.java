@@ -16,6 +16,8 @@
 package org.jitsi.videobridge.transform;
 
 import org.jitsi.impl.neomedia.transform.*;
+import org.jitsi.impl.neomedia.transform.delay.*;
+import org.jitsi.util.*;
 import org.jitsi.videobridge.*;
 import org.jitsi.videobridge.simulcast.*;
 
@@ -26,10 +28,18 @@ import java.util.*;
  *
  * @author Boris Grozev
  * @author George Politis
+ * @author Pawel Domas
  */
 public class RtpChannelTransformEngine
     extends TransformEngineChain
 {
+    /**
+     * The {@link Logger} used by the {@link RtpChannelTransformEngine} class
+     * to print debug information. Note that {@link Conference} instances should
+     * use {@link #logger} instead.
+     */
+    private static final Logger classLogger
+        = Logger.getLogger(RtpChannelTransformEngine.class);
     /**
      * The payload type number for RED packets. We should set this dynamically
      * but it is not clear exactly how to do it, because it isn't used on this
@@ -60,6 +70,12 @@ public class RtpChannelTransformEngine
     private SimulcastEngine simulcastEngine;
 
     /**
+     * The {@link Logger} to be used by this instance to print debug
+     * information.
+     */
+    private final Logger logger;
+
+    /**
      * Initializes a new <tt>RtpChannelTransformEngine</tt> for a specific
      * <tt>RtpChannel</tt>.
      * @param channel the <tt>RtpChannel</tt>.
@@ -67,6 +83,10 @@ public class RtpChannelTransformEngine
     public RtpChannelTransformEngine(RtpChannel channel)
     {
         this.channel = channel;
+        this.logger
+            = Logger.getLogger(
+                    classLogger,
+                    channel.getContent().getConference().getLogger());
 
         engineChain = createChain();
     }
@@ -142,5 +162,49 @@ public class RtpChannelTransformEngine
     public SimulcastEngine getSimulcastEngine()
     {
         return simulcastEngine;
+    }
+
+    /**
+     * Sets a delay of the RTP stream expressed in a number of packets.
+     * The property is immutable which means than once set can not be changed
+     * later.
+     *
+     * @param packetDelay tells by how many packets RTP stream should be
+     * delayed. Will have effect only if greater than 0.
+     *
+     * @return <tt>true</tt> if the delay has been set or <tt>false</tt>
+     * otherwise.
+     */
+    public boolean setPacketDelay(int packetDelay)
+    {
+        if (packetDelay > 0)
+        {
+            // Do not allow to add second delaying transformer
+            // Note that replacing existing transformer will make any packets
+            // queued in it's buffer disappear, so it's not safe to allow
+            // replacement
+            for (TransformEngine engine : engineChain)
+            {
+                if (engine instanceof DelayingTransformEngine)
+                {
+                    logger.warn(
+                        "Can not modify packet-delay once it has been set.");
+                    return false;
+                }
+            }
+
+            if (addEngine(new DelayingTransformEngine(packetDelay)))
+            {
+                logger.info("Adding delaying packet transformer to "
+                        + channel.getID() + ", packet delay: " + packetDelay);
+                return true;
+            }
+            else
+            {
+                logger.warn("Failed to add delaying packet transformer");
+                return false;
+            }
+        }
+        return false;
     }
 }

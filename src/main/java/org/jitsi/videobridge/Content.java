@@ -19,9 +19,11 @@ import java.io.*;
 import java.lang.ref.*;
 import java.util.*;
 
+import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
 import net.java.sip.communicator.impl.protocol.jabber.extensions.jingle.*;
 
 import org.jitsi.eventadmin.*;
+import org.jitsi.impl.neomedia.device.*;
 import org.jitsi.impl.neomedia.rtp.translator.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.service.neomedia.device.*;
@@ -41,10 +43,10 @@ public class Content
     implements RTPTranslator.WriteFilter
 {
     /**
-     * The <tt>Logger</tt> used by the <tt>Content</tt> class and its instances
-     * to print debug information.
+     * The @{link #Logger} used by the {@link Content} class. Note that class
+     * instances should use {@link #logger} instead.
      */
-    private static final Logger logger = Logger.getLogger(Content.class);
+    private static final Logger classLogger = Logger.getLogger(Content.class);
 
     /**
      * The name of the property which specifies an event that a
@@ -136,6 +138,12 @@ public class Content
     private RTPTranslator rtpTranslator;
 
     /**
+     * The {@link Logger} to be used by this instance to print debug
+     * information.
+     */
+    private final Logger logger;
+
+    /**
      * Initializes a new <tt>Content</tt> instance which is to be a part of a
      * specific <tt>Conference</tt> and which is to have a specific name.
      *
@@ -152,16 +160,13 @@ public class Content
 
         this.conference = conference;
         this.name = name;
+        this.logger = Logger.getLogger(classLogger, conference.getLogger());
 
         mediaType = MediaType.parseString(this.name);
 
-        EventAdmin eventAdmin
-            = this.conference.getVideobridge().getEventAdmin();
-
+        EventAdmin eventAdmin = conference.getEventAdmin();
         if (eventAdmin != null)
-        {
             eventAdmin.sendEvent(EventFactory.contentCreated(this));
-        }
 
         touch();
     }
@@ -247,12 +252,14 @@ public class Content
      * or {@link RawUdpTransportPacketExtension#NAMESPACE}.
      * @param initiator the value to use for the initiator field, or
      * <tt>null</tt> to use the default value.
+     * @param rtpLevelRelayType
      * @return the created <tt>RtpChannel</tt> instance.
      * @throws Exception
      */
     public RtpChannel createRtpChannel(String channelBundleId,
                                        String transportNamespace,
-                                       Boolean initiator)
+                                       Boolean initiator,
+                                       RTPLevelRelayType rtpLevelRelayType)
         throws Exception
     {
         RtpChannel channel = null;
@@ -296,9 +303,7 @@ public class Content
         while (channel == null);
 
         // Initialize channel
-        channel.initialize();
-
-        Videobridge videobridge = getConference().getVideobridge();
+        channel.initialize(rtpLevelRelayType);
 
         if (logger.isInfoEnabled())
         {
@@ -308,6 +313,7 @@ public class Content
              * of causing deadlocks.
              */
 
+            Videobridge videobridge = getConference().getVideobridge();
             logger.info(
                     "Created channel " + channel.getID() + " of content "
                         + getName() + " of conference " + conference.getID()
@@ -387,12 +393,15 @@ public class Content
         }
 
         setRecording(false, null);
+
         Conference conference = getConference();
 
-        EventAdmin eventAdmin
-                = conference.getVideobridge().getEventAdmin();
+        EventAdmin eventAdmin = conference.getEventAdmin();
         if (eventAdmin != null)
+        {
             eventAdmin.sendEvent(EventFactory.contentExpired(this));
+        }
+
         try
         {
             conference.expireContent(this);
@@ -832,22 +841,6 @@ public class Content
             }
             return rtpTranslator;
         }
-    }
-
-    /**
-     * Returns <tt>SctpConnection</tt> for given <tt>Endpoint</tt>.
-     *
-     * @param endpoint the <tt>Endpoint</tt> of <tt>SctpConnection</tt> that
-     * we're looking for.
-     * @return <tt>SctpConnection</tt> for given <tt>Endpoint</tt> if any or
-     * <tt>null</tt> otherwise.
-     */
-    @Deprecated
-    public SctpConnection getSctpConnection(Endpoint endpoint)
-    {
-        // SCTP connection is bound to an Endpoint just after gets created
-        // (in the constructor), so expect to find it there
-        return (endpoint == null) ? null : endpoint.getSctpConnection();
     }
 
     /**

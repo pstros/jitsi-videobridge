@@ -21,7 +21,9 @@ import java.util.*;
 import java.util.concurrent.locks.*;
 
 import org.jitsi.service.neomedia.*;
+import org.jitsi.service.neomedia.stats.*;
 import org.jitsi.videobridge.*;
+import org.json.simple.*;
 import org.osgi.framework.*;
 
 /**
@@ -40,16 +42,24 @@ public class VideobridgeStatistics
     public static final String AUDIOCHANNELS = "audiochannels";
 
     /**
-     * The name of the bit rate statistic for download. Its runtime type is
-     * {@code String} and the value represents a {@code double} value.
+     * The name of the bit rate statistic for download.
      */
     public static final String BITRATE_DOWNLOAD = "bit_rate_download";
 
     /**
-     * The name of the bit rate statistic for upload. Its runtime type is
-     * {@code String} and the value represents a {@code double} value.
+     * The name of the bit rate statistic for upload.
      */
     public static final String BITRATE_UPLOAD = "bit_rate_upload";
+
+    /**
+     * The name of the packet rate statistic for download.
+     */
+    public static final String PACKET_RATE_DOWNLOAD = "packet_rate_download";
+
+    /**
+     * The name of the packet rate statistic for upload.
+     */
+    public static final String PACKET_RATE_UPLOAD = "packet_rate_upload";
 
     /**
      * The name of the number of conferences statistic. Its runtime type is
@@ -58,8 +68,7 @@ public class VideobridgeStatistics
     public static final String CONFERENCES = "conferences";
 
     /**
-     * The name of the CPU usage statistic. Its runtime type is {@code String}
-     * and the value represents a {@code double} value.
+     * The name of the CPU usage statistic.
      */
     public static final String CPU_USAGE = "cpu_usage";
 
@@ -68,9 +77,6 @@ public class VideobridgeStatistics
      * in order to represent time and date as <tt>String</tt>.
      */
     private static final DateFormat dateFormat;
-
-    private static final DecimalFormat decimalFormat
-        = new DecimalFormat("#.#####");
 
     /**
      * The name of the number of participants statistic. Its runtime type is
@@ -85,10 +91,45 @@ public class VideobridgeStatistics
     public static final String NUMBEROFTHREADS = "threads";
 
     /**
-     * The name of the RTP loss statistic. Its runtime type is {@code String}
-     * and the value represents a {@code double} value.
+     * The name of the RTP loss statistic.
+     * @deprecated
      */
     public static final String RTP_LOSS = "rtp_loss";
+
+    /**
+     * The name of the loss rate statistic.
+     */
+    public static final String LOSS_RATE_DOWNLOAD = "loss_rate_download";
+
+    /**
+     * The name of the loss rate statistic.
+     */
+    public static final String LOSS_RATE_UPLOAD = "loss_rate_upload";
+
+    /**
+     * The name of the aggregate jitter statistic.
+     */
+    public static final String JITTER_AGGREGATE = "jitter_aggregate";
+
+    /**
+     * The name of the aggregate RTT statistic.
+     */
+    public static final String RTT_AGGREGATE = "rtt_aggregate";
+
+    /**
+     * The name of the "largest conference" statistic.
+     */
+    public static final String LARGEST_CONFERENCE = "largest_conference";
+
+    /**
+     * The name of the conference sizes statistic.
+     */
+    public static final String CONFERENCE_SIZES = "conference_sizes";
+
+    /**
+     * The number of buckets to use for conference sizes.
+     */
+    private static final int CONFERENCE_SIZE_BUCKETS = 15;
 
     /**
      * The name of the stat that indicates the bridge has entered graceful
@@ -107,6 +148,71 @@ public class VideobridgeStatistics
      * The name of total memory statistic. Its runtime type is {@code Integer}.
      */
     public static final String TOTAL_MEMORY = "total_memory";
+
+    /**
+     * The name of the total number of channels without any payload (RTP/RTCP)
+     * traffic.
+     */
+    private static final String TOTAL_NO_PAYLOAD_CHANNELS
+        = "total_no_payload_channels";
+
+    /**
+     * The name of the total number of channels where the transport failed to
+     * be established.
+     */
+    private static final String TOTAL_NO_TRANSPORT_CHANNELS
+        = "total_no_transport_channels";
+
+    /**
+     * The name of the total number of channels (failed + succeeded).
+     */
+    private static final String TOTAL_CHANNELS
+        = "total_channels";
+
+    /**
+     * The name of the total number of conferences where all channels failed
+     * due to no payload traffic.
+     */
+    private static final String TOTAL_FAILED_CONFERENCES
+        = "total_failed_conferences";
+
+    /**
+     * The name of the total number of conferences with some failed channels.
+     */
+    private static final String TOTAL_PARTIALLY_FAILED_CONFERENCES
+        = "total_partially_failed_conferences";
+
+    /**
+     * The name of the total number of completed/expired conferences
+     * (failed + succeeded).
+     */
+    private static final String TOTAL_CONFERENCES_COMPLETED
+        = "total_conferences_completed";
+
+    /**
+     * The name of the stat indicating the total number of conferences created.
+     */
+    private static final String TOTAL_CONFERENCES_CREATED
+        = "total_conferences_created";
+
+    /**
+     * The name of the stat indicating the total number of conference-seconds
+     * (i.e. the sum of the lengths is seconds).
+     */
+    private static final String TOTAL_CONFERENCE_SECONDS
+        = "total_conference_seconds";
+
+    /**
+     * The name of the stat indicating the total number of media connections
+     * established over UDP.
+     */
+    private static final String TOTAL_UDP_CONNECTIONS = "total_udp_connections";
+
+    /**
+     * The name of the stat indicating the total number of media connections
+     * established over TCP.
+     */
+    private static final String TOTAL_TCP_CONNECTIONS = "total_tcp_connections";
 
     /**
      * The name of used memory statistic. Its runtime type is {@code Integer}.
@@ -132,17 +238,6 @@ public class VideobridgeStatistics
     }
 
     /**
-     * Returns bit rate value in Kb/s
-     * @param bytes number of bytes
-     * @param period the period of time in milliseconds
-     * @return the bit rate
-     */
-    private static double calculateBitRate(long bytes, long period)
-    {
-        return (bytes * 8.0d) / period;
-    }
-
-    /**
      * Returns the current time stamp as a (formatted) <tt>String</tt>.
      * @return the current time stamp as a (formatted) <tt>String</tt>.
      */
@@ -161,27 +256,29 @@ public class VideobridgeStatistics
     private boolean inGenerate = false;
 
     /**
-     * The time in milliseconds at which {@link #generate()} was invoked last.
-     */
-    private long lastGenerateTime;
-
-    /**
      * Creates instance of <tt>VideobridgeStatistics</tt>.
      */
     public VideobridgeStatistics()
     {
+        // Is it necessary to set initial values for all of these?
         unlockedSetStat(AUDIOCHANNELS, 0);
-        unlockedSetStat(BITRATE_DOWNLOAD, decimalFormat.format(0.0d));
-        unlockedSetStat(BITRATE_UPLOAD, decimalFormat.format(0.0d));
+        unlockedSetStat(BITRATE_DOWNLOAD, 0d);
+        unlockedSetStat(BITRATE_UPLOAD, 0d);
         unlockedSetStat(CONFERENCES, 0);
-        unlockedSetStat(CPU_USAGE, decimalFormat.format(0.0d));
+        unlockedSetStat(CPU_USAGE, 0d);
         unlockedSetStat(NUMBEROFPARTICIPANTS, 0);
         unlockedSetStat(NUMBEROFTHREADS, 0);
-        unlockedSetStat(RTP_LOSS, decimalFormat.format(0.0d));
+        unlockedSetStat(RTP_LOSS, 0d);
         unlockedSetStat(TOTAL_MEMORY, 0);
         unlockedSetStat(USED_MEMORY, 0);
         unlockedSetStat(VIDEOCHANNELS, 0);
         unlockedSetStat(VIDEOSTREAMS, 0);
+        unlockedSetStat(LOSS_RATE_DOWNLOAD, 0d);
+        unlockedSetStat(LOSS_RATE_UPLOAD, 0d);
+        unlockedSetStat(JITTER_AGGREGATE, 0d);
+        unlockedSetStat(RTT_AGGREGATE, 0d);
+        unlockedSetStat(LARGEST_CONFERENCE, 0);
+        unlockedSetStat(CONFERENCE_SIZES, "[]");
 
         unlockedSetStat(TIMESTAMP, currentTimeMillis());
     }
@@ -247,81 +344,181 @@ public class VideobridgeStatistics
         int conferences = 0;
         int endpoints = 0;
         int videoStreams = 0;
-        long packets = 0, packetsLost = 0;
-        long bytesReceived = 0, bytesSent = 0;
+        double fractionLostSum = 0d;
+        int fractionLostCount = 0;
+        long packetsReceived = 0, packetsReceivedLost = 0;
+        long bitrateDownloadBps = 0, bitrateUploadBps = 0;
+        // Average jitter and RTT across MediaStreams which report a valid value.
+        double jitterSumMs = 0;
+        long rttSumMs = 0;
+        int jitterCount = 0, rttCount = 0;
+        int largestConferenceSize = 0;
+        int[] conferenceSizes = new int[CONFERENCE_SIZE_BUCKETS];
+        int packetRateUpload = 0, packetRateDownload = 0;
+
         boolean shutdownInProgress = false;
+
+        int totalConferencesCreated = 0, totalConferencesCompleted = 0,
+            totalFailedConferences = 0, totalPartiallyFailedConferences = 0,
+            totalNoTransportChannels = 0, totalNoPayloadChannels = 0,
+            totalChannels = 0;
+        long totalConferenceSeconds = 0;
+        int totalUdpConnections = 0, totalTcpConnections = 0;
 
         BundleContext bundleContext
             = StatsManagerBundleActivator.getBundleContext();
-
-        if (bundleContext != null)
+        for (Videobridge videobridge
+                : Videobridge.getVideobridges(bundleContext))
         {
-            for (Videobridge videobridge
-                    : Videobridge.getVideobridges(bundleContext))
+            Videobridge.Statistics jvbStats = videobridge.getStatistics();
+            totalConferencesCreated += jvbStats.totalConferencesCreated.get();
+            totalConferencesCompleted
+                += jvbStats.totalConferencesCompleted.get();
+            totalConferenceSeconds += jvbStats.totalConferenceSeconds.get();
+            totalFailedConferences += jvbStats.totalFailedConferences.get();
+            totalPartiallyFailedConferences
+                += jvbStats.totalPartiallyFailedConferences.get();
+            totalNoTransportChannels += jvbStats.totalNoTransportChannels.get();
+            totalNoPayloadChannels += jvbStats.totalNoPayloadChannels.get();
+            totalChannels += jvbStats.totalChannels.get();
+            totalUdpConnections += jvbStats.totalUdpTransportManagers.get();
+            totalTcpConnections += jvbStats.totalTcpTransportManagers.get();
+
+            for (Conference conference : videobridge.getConferences())
             {
-                for (Conference conference : videobridge.getConferences())
+                if (!conference.includeInStatistics())
                 {
-                    for (Content content : conference.getContents())
+                    continue;
+                }
+
+                conferences++;
+                int conferenceEndpoints = conference.getEndpointCount();
+                endpoints += conference.getEndpointCount();
+                if (conferenceEndpoints > largestConferenceSize)
+                {
+                    largestConferenceSize = conferenceEndpoints;
+                }
+
+                int idx
+                    = conferenceEndpoints < conferenceSizes.length
+                    ? conferenceEndpoints
+                    : conferenceSizes.length - 1;
+                conferenceSizes[idx]++;
+
+                for (Content content : conference.getContents())
+                {
+                    MediaType mediaType = content.getMediaType();
+                    int contentChannelCount = content.getChannelCount();
+
+                    if (MediaType.AUDIO.equals(mediaType))
+                        audioChannels += contentChannelCount;
+                    else if (MediaType.VIDEO.equals(mediaType))
+                        videoChannels += content.getChannelCount();
+
+                    for (Channel channel : content.getChannels())
                     {
-                        MediaType mediaType = content.getMediaType();
-                        int contentChannelCount = content.getChannelCount();
-
-                        if(MediaType.AUDIO.equals(mediaType))
-                            audioChannels += contentChannelCount;
-                        else if(MediaType.VIDEO.equals(mediaType))
-                            videoChannels += content.getChannelCount();
-
-                        for(Channel channel : content.getChannels())
+                        if (channel instanceof RtpChannel)
                         {
-                            if(channel instanceof RtpChannel)
+                            RtpChannel rtpChannel = (RtpChannel) channel;
+                            MediaStream stream = rtpChannel.getStream();
+                            if (stream == null)
                             {
-                                RtpChannel rtpChannel = (RtpChannel) channel;
+                                continue;
+                            }
+                            MediaStreamStats2 stats
+                                = stream.getMediaStreamStats();
+                            ReceiveTrackStats receiveStats
+                                = stats.getReceiveStats();
+                            SendTrackStats sendStats = stats.getSendStats();
 
-                                packets += rtpChannel.getLastPacketsNB();
-                                packetsLost
-                                    += rtpChannel.getLastPacketsLostNB();
-                                bytesReceived
-                                    += rtpChannel.getNBReceivedBytes();
-                                bytesSent += rtpChannel.getNBSentBytes();
+                            packetsReceived += receiveStats.getCurrentPackets();
+                            packetsReceivedLost
+                                += receiveStats.getCurrentPacketsLost();
+                            fractionLostCount += 1;
+                            fractionLostSum += sendStats.getLossRate();
+                            packetRateDownload += receiveStats.getPacketRate();
+                            packetRateUpload += sendStats.getPacketRate();
 
-                                if (channel instanceof VideoChannel)
-                                {
-                                    VideoChannel videoChannel
-                                        = (VideoChannel) channel;
+                            bitrateDownloadBps += receiveStats.getBitrate();
+                            bitrateUploadBps += sendStats.getBitrate();
 
-                                    //assume we're receiving a stream
-                                    int channelStreams = 1;
-                                    int lastN = videoChannel.getLastN();
-                                    channelStreams
-                                        += (lastN == -1)
-                                            ? (contentChannelCount - 1)
-                                            : Math.min(
-                                                    lastN,
-                                                    contentChannelCount - 1);
+                            double jitter = sendStats.getJitter();
+                            if (jitter != TrackStats.JITTER_UNSET)
+                            {
+                                // We take the abs because otherwise the
+                                // aggregate makes no sense.
+                                jitterSumMs += Math.abs(jitter);
+                                jitterCount++;
+                            }
+                            jitter = receiveStats.getJitter();
+                            if (jitter != TrackStats.JITTER_UNSET)
+                            {
+                                // We take the abs because otherwise the
+                                // aggregate makes no sense.
+                                jitterSumMs += Math.abs(jitter);
+                                jitterCount++;
+                            }
 
-                                    videoStreams += channelStreams;
-                                }
+                            long rtt = sendStats.getRtt();
+                            if (rtt > 0)
+                            {
+                                rttSumMs += rtt;
+                                rttCount++;
+                            }
+
+                            if (channel instanceof VideoChannel)
+                            {
+                                VideoChannel videoChannel
+                                    = (VideoChannel) channel;
+
+                                //assume we're receiving a stream
+                                int channelStreams = 1;
+                                int lastN = videoChannel.getLastN();
+                                channelStreams
+                                    += (lastN == -1)
+                                        ? (contentChannelCount - 1)
+                                        : Math.min(
+                                                lastN, contentChannelCount - 1);
+
+                                videoStreams += channelStreams;
                             }
                         }
                     }
-                    conferences++;
-                    endpoints += conference.getEndpointCount();
                 }
-                if (videobridge.isShutdownInProgress())
-                {
-                    shutdownInProgress = true;
-                }
+            }
+
+            if (videobridge.isShutdownInProgress())
+            {
+                shutdownInProgress = true;
             }
         }
 
-        // BITRATE_DOWNLOAD, BITRATE_UPLOAD
-        long now = System.currentTimeMillis();
+        // Loss rates
+        double lossRateDownload
+            = (packetsReceived + packetsReceivedLost > 0)
+            ? ((double) packetsReceivedLost) / (packetsReceived + packetsReceivedLost)
+            : 0d;
+        double lossRateUpload
+            = (fractionLostCount > 0)
+            ? fractionLostSum / fractionLostCount
+            : 0d;
 
-        // RTP_LOSS
-        double rtpLoss
-            = ((packetsLost > 0) && (packets > 0))
-                ? ((double) packetsLost) / packets
-                : 0.0d;
+        // JITTER_AGGREGATE
+        double jitterAggregate
+            = jitterCount > 0
+            ? jitterSumMs / jitterCount
+            : 0;
+
+        // RTT_AGGREGATE
+        double rttAggregate
+            = rttCount > 0
+            ? ((double) rttSumMs) / rttCount
+            : 0;
+
+        // CONFERENCE_SIZES
+        JSONArray conferenceSizesJson = new JSONArray();
+        for (int size : conferenceSizes)
+            conferenceSizesJson.add(size);
 
         // NUMBEROFTHREADS
         int threadCount = ManagementFactory.getThreadMXBean().getThreadCount();
@@ -343,46 +540,53 @@ public class VideobridgeStatistics
         lock.lock();
         try
         {
-            double bitrateDownload = 0.0d;
-            double bitrateUpload = 0.0d;
-
-            if (lastGenerateTime != 0)
-            {
-                long period = now - lastGenerateTime;
-
-                if (period > 0)
-                {
-                    bitrateDownload = calculateBitRate(bytesReceived, period);
-                    bitrateUpload = calculateBitRate(bytesSent, period);
-                }
-            }
-            lastGenerateTime = now;
-
             unlockedSetStat(
                     BITRATE_DOWNLOAD,
-                    decimalFormat.format(bitrateDownload));
+                    bitrateDownloadBps / 1000 /* kbps */);
             unlockedSetStat(
                     BITRATE_UPLOAD,
-                    decimalFormat.format(bitrateUpload));
-
-            unlockedSetStat(RTP_LOSS, decimalFormat.format(rtpLoss));
-
+                    bitrateUploadBps / 1000 /* kbps */);
+            unlockedSetStat(PACKET_RATE_DOWNLOAD, packetRateDownload);
+            unlockedSetStat(PACKET_RATE_UPLOAD, packetRateUpload);
+            // Keep for backward compatibility
+            unlockedSetStat(
+                    RTP_LOSS,
+                    lossRateDownload + lossRateUpload);
+            unlockedSetStat(LOSS_RATE_DOWNLOAD, lossRateDownload);
+            unlockedSetStat(LOSS_RATE_UPLOAD, lossRateUpload);
+            unlockedSetStat(JITTER_AGGREGATE, jitterAggregate);
+            unlockedSetStat(RTT_AGGREGATE, rttAggregate);
             unlockedSetStat(AUDIOCHANNELS, audioChannels);
+            unlockedSetStat(TOTAL_FAILED_CONFERENCES, totalFailedConferences);
+            unlockedSetStat(
+                    TOTAL_PARTIALLY_FAILED_CONFERENCES,
+                    totalPartiallyFailedConferences);
+            unlockedSetStat(
+                    TOTAL_NO_PAYLOAD_CHANNELS,
+                    totalNoPayloadChannels);
+            unlockedSetStat(
+                    TOTAL_NO_TRANSPORT_CHANNELS,
+                    totalNoTransportChannels);
+            unlockedSetStat(
+                    TOTAL_CONFERENCES_CREATED,
+                    totalConferencesCreated);
+            unlockedSetStat(
+                    TOTAL_CONFERENCES_COMPLETED,
+                    totalConferencesCompleted);
+            unlockedSetStat(TOTAL_UDP_CONNECTIONS, totalUdpConnections);
+            unlockedSetStat(TOTAL_TCP_CONNECTIONS, totalTcpConnections);
+            unlockedSetStat(TOTAL_CONFERENCE_SECONDS, totalConferenceSeconds);
+            unlockedSetStat(TOTAL_CHANNELS, totalChannels);
             unlockedSetStat(CONFERENCES, conferences);
             unlockedSetStat(NUMBEROFPARTICIPANTS, endpoints);
             unlockedSetStat(VIDEOCHANNELS, videoChannels);
             unlockedSetStat(VIDEOSTREAMS, videoStreams);
-
+            unlockedSetStat(LARGEST_CONFERENCE, largestConferenceSize);
+            unlockedSetStat(CONFERENCE_SIZES, conferenceSizesJson);
             unlockedSetStat(NUMBEROFTHREADS, threadCount);
-
-            unlockedSetStat(
-                    CPU_USAGE,
-                    (cpuUsage < 0) ? null : decimalFormat.format(cpuUsage));
-            unlockedSetStat(
-                    TOTAL_MEMORY,
-                    (totalMemory < 0) ? null : totalMemory);
-            unlockedSetStat(USED_MEMORY, (usedMemory < 0) ? null : usedMemory);
-
+            unlockedSetStat(CPU_USAGE, Math.max(cpuUsage, 0));
+            unlockedSetStat(TOTAL_MEMORY, Math.max(totalMemory, 0));
+            unlockedSetStat(USED_MEMORY, Math.max(usedMemory, 0));
             unlockedSetStat(SHUTDOWN_IN_PROGRESS, shutdownInProgress);
 
             unlockedSetStat(TIMESTAMP, timestamp);
