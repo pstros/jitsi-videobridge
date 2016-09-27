@@ -19,6 +19,8 @@ import java.io.*;
 import java.lang.ref.*;
 import java.util.*;
 
+import org.jitsi.service.configuration.*;
+import org.jitsi.service.libjitsi.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.util.*;
 import org.jitsi.util.event.*;
@@ -45,10 +47,10 @@ public class Endpoint
         = Endpoint.class.getName() + ".channels";
 
     /**
-     * The <tt>Logger</tt> used by the <tt>Endpoint</tt> class and its instances
-     * to print debug information.
+     * The {@link Logger} used by the {@link Endpoint} class to print debug
+     * information.
      */
-    private static final Logger logger = Logger.getLogger(Endpoint.class);
+    private static final Logger classLogger = Logger.getLogger(Endpoint.class);
 
     /**
      * The name of the <tt>Endpoint</tt> property <tt>pinnedEndpoint</tt> which
@@ -110,9 +112,20 @@ public class Endpoint
         = "EndpointMessage";
 
     /**
+     * Configuration property for number of streams to cache
+     */
+    public final static String ENABLE_LIPSYNC_HACK_PNAME
+        = Endpoint.class.getName() + ".ENABLE_LIPSYNC_HACK";
+
+    /**
      * The list of <tt>Channel</tt>s associated with this <tt>Endpoint</tt>.
      */
     private final List<WeakReference<RtpChannel>> channels = new LinkedList<>();
+
+    /**
+     * The object that implements a hack for LS for this {@link Endpoint}.
+     */
+    private final LipSyncHack lipSyncHack;
 
     /**
      * The (human readable) display name of this <tt>Endpoint</tt>.
@@ -148,10 +161,9 @@ public class Endpoint
     private final Object selectedEndpointSyncRoot = new Object();
 
     /**
-     * A weak reference to the <tt>Conference</tt> this <tt>Endpoint</tt>
-     * belongs to.
+     * A reference to the <tt>Conference</tt> this <tt>Endpoint</tt> belongs to.
      */
-    private final WeakReference<Conference> weakConference;
+    private final Conference conference;
 
     /**
      * The list of IDs of the pinned endpoints of this {@code endpoint}.
@@ -159,10 +171,16 @@ public class Endpoint
     private List<String> pinnedEndpoints = new LinkedList<>();
 
     /**
-     * A weak reference to the currently selected <tt>Endpoint</tt> at this
+     * The list of currently selected <tt>Endpoint</tt>s at this
      * <tt>Endpoint</tt>.
      */
-    private WeakReference<Endpoint> weakSelectedEndpoint;
+    private Set<Endpoint> selectedEndpoints = new HashSet<>();
+
+    /**
+     * The {@link Logger} to be used by this instance to print debug
+     * information.
+     */
+    private final Logger logger;
 
     /**
      * Initializes a new <tt>Endpoint</tt> instance with a specific (unique)
@@ -174,11 +192,18 @@ public class Endpoint
      */
     public Endpoint(String id, Conference conference)
     {
-        if (id == null)
-            throw new NullPointerException("id");
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(conference, "conference");
 
-        this.weakConference = new WeakReference<>(conference);
+        this.conference = conference;
         this.id = id;
+        this.logger = Logger.getLogger(classLogger, conference.getLogger());
+
+        ConfigurationService cfg = LibJitsi.getConfigurationService();
+
+        this.lipSyncHack
+            = cfg != null && cfg.getBoolean(ENABLE_LIPSYNC_HACK_PNAME, false)
+                ? new LipSyncHack(this) : null;
     }
 
     /**
@@ -345,18 +370,36 @@ public class Endpoint
     }
 
     /**
-     * Gets the currently selected <tt>Endpoint</tt> at this <tt>Endpoint</tt>.
+     * Gets the object that implements a hack for LS for this {@link Endpoint}.
      *
-     * @return the currently selected <tt>Endpoint</tt> at this
+     * @return the object that implements a hack for LS for this
+     * {@link Endpoint}.
+     */
+    public LipSyncHack getLipSyncHack()
+    {
+        return lipSyncHack;
+    }
+
+    /**
+     * Gets the currently selected <tt>Endpoint</tt>s at this <tt>Endpoint</tt>
+     *
+     * @return the currently selected <tt>Endpoint</tt>s at this
      * <tt>Endpoint</tt>.
      */
-    private Endpoint getSelectedEndpoint()
+    public Set<Endpoint> getSelectedEndpoints()
     {
-        WeakReference<Endpoint> wr = this.weakSelectedEndpoint;
-        Endpoint e = wr == null ? null : wr.get();
+        Set<Endpoint> result = new HashSet<>();
+        for (Endpoint endpoint : selectedEndpoints)
+        {
+            if (!endpoint.isExpired())
+            {
+                result.add(endpoint);
+            }
+        }
 
-        return e == null || e.expired ? null : e;
+        return result;
     }
+
 
     /**
      * @return the list of pinned endpoints, represented as a list of endpoint
@@ -374,9 +417,19 @@ public class Endpoint
      */
     public Conference getConference()
     {
-        WeakReference<Conference> wr = weakConference;
+        return this.conference;
+    }
 
-        return (wr == null) ? null : wr.get();
+    /**
+     * Checks whether or not this <tt>Endpoint</tt> is considered "expired"
+     * ({@link #expire()} method has been called).
+     *
+     * @return <tt>true</tt> if this instance is "expired" or <tt>false</tt>
+     * otherwise.
+     */
+    public boolean isExpired()
+    {
+        return expired;
     }
 
     /**
@@ -474,35 +527,44 @@ public class Endpoint
      * channel (e.g. file transfer), such that it may interfere with other 
      * jitsi-messages.
      */
+    @SuppressWarnings("unchecked")
     private void onClientEndpointMessage(
             WebRtcDataStream src,
             JSONObject jsonObject)
     {
         String to = (String)jsonObject.get("to");
-        String msgPayload = jsonObject.get("msgPayload").toString();
-        Conference conf = getConference();
+        jsonObject.put("from", getID());
+        if (conference.isExpired())
+        {
+            logger.warn(
+                "Unable to send EndpointMessage - the conference has expired");
+            return;
+        }
+
         if ("".equals(to))
         {
             // Broadcast message
             List<Endpoint> endpointSubset = new ArrayList<>();
-            for (Endpoint endpoint : conf.getEndpoints())
+            for (Endpoint endpoint : conference.getEndpoints())
             {
                 if (!endpoint.getID().equalsIgnoreCase(getID()))
                 {
                     endpointSubset.add(endpoint);
                 }
             }
-            conf.sendMessageOnDataChannels(msgPayload, endpointSubset);
+            conference.sendMessageOnDataChannels(
+                    jsonObject.toString(), endpointSubset);
         }
         else
         {
             // 1:1 message
-            Endpoint ep = conf.getEndpoint(to);
+            Endpoint ep = conference.getEndpoint(to);
             if (ep != null)
             {
                 List<Endpoint> endpointSubset = new ArrayList<>();
-                endpointSubset.add(conf.getEndpoint(to));
-                conf.sendMessageOnDataChannels(msgPayload, endpointSubset);
+                endpointSubset.add(ep);
+                conference.sendMessageOnDataChannels(
+                        jsonObject.toString(), endpointSubset);
             }
             else
             {
@@ -647,48 +709,40 @@ public class Endpoint
             WebRtcDataStream src,
             JSONObject jsonObject)
     {
-        String newSelectedEndpointID
-            = (String) jsonObject.get("selectedEndpoint");
+        List<String> newSelectedEndpointIDs
+                = readSelectedEndpointID(jsonObject);
 
         if (logger.isDebugEnabled())
         {
             StringCompiler sc = new StringCompiler();
-            sc.bind("selectedId", newSelectedEndpointID);
+            sc.bind("selectedIds", newSelectedEndpointIDs);
             sc.bind("this", this);
             logger.debug(sc.c(
                     "Endpoint {this.id} notified us that its big screen"
-                        + " displays endpoint {selectedId}."));
+                        + " displays endpoint {selectedIds}."));
         }
 
-        Conference conference = weakConference.get();
+        Set<Endpoint> newSelectedEndpoints = new HashSet<>();
 
-        Endpoint newSelectedEndpoint;
-        if (!StringUtils.isNullOrEmpty(newSelectedEndpointID)
-                && conference != null)
-        {
-            newSelectedEndpoint = conference.getEndpoint(newSelectedEndpointID);
-        }
-        else
-        {
-            newSelectedEndpoint = null;
+        if (!newSelectedEndpointIDs.isEmpty() && !conference.isExpired()) {
+            for (String endpointId : newSelectedEndpointIDs) {
+                Endpoint endpoint = conference.getEndpoint(endpointId);
+                if (endpoint != null) {
+                    newSelectedEndpoints.add(endpoint);
+                }
+            }
         }
 
         boolean changed;
-        Endpoint oldSelectedEndpoint = this.getSelectedEndpoint();
+        Set<Endpoint> oldSelectedEndpoints = this.getSelectedEndpoints();
         synchronized (selectedEndpointSyncRoot)
         {
-            changed = newSelectedEndpoint != oldSelectedEndpoint;
+            // Compare the collections
+            changed = !(oldSelectedEndpoints.equals(newSelectedEndpoints));
+
             if (changed)
             {
-                if (newSelectedEndpoint == null)
-                {
-                    this.weakSelectedEndpoint = null;
-                }
-                else
-                {
-                    this.weakSelectedEndpoint
-                        = new WeakReference<>(newSelectedEndpoint);
-                }
+                this.selectedEndpoints = new HashSet<>(newSelectedEndpoints);
             }
         }
 
@@ -703,14 +757,46 @@ public class Endpoint
             if (logger.isDebugEnabled())
             {
                 StringCompiler sc = new StringCompiler();
-                sc.bind("selected", newSelectedEndpoint);
+                sc.bind("newSelectedEndpoints", newSelectedEndpoints);
                 sc.bind("this", this);
                 logger.debug(sc.c(
-                        "Endpoint {this.id} selected {selected.id}."));
+                        "Endpoint {this.id} selected {newSelectedEndpoints}."));
             }
             firePropertyChange(SELECTED_ENDPOINT_PROPERTY_NAME,
-                oldSelectedEndpoint, newSelectedEndpoint);
+                oldSelectedEndpoints, newSelectedEndpoints);
         }
+    }
+
+    /**
+     * A helper function that reads the selected endpoint id list from the json
+     * message. Accepts ID list and a single ID
+     *
+     * @param jsonObject The whole message that contains a 'selectedEnpoint'
+     *                   field
+     * @return The list of the IDs or empty list if some problem happened
+     */
+    static private List<String> readSelectedEndpointID(JSONObject jsonObject)
+    {
+        List<String> selectedEndpointIDs;
+        Object selectedEndpointJsonObject = jsonObject.get("selectedEndpoint");
+
+        if (selectedEndpointJsonObject != null &&
+                selectedEndpointJsonObject instanceof JSONArray)
+        {   // JSONArray is an ArrayList
+            selectedEndpointIDs = (List<String>) selectedEndpointJsonObject;
+        }
+        else if (selectedEndpointJsonObject != null &&
+                selectedEndpointJsonObject instanceof String)
+        {
+            selectedEndpointIDs = new ArrayList<>();
+            selectedEndpointIDs.add((String)selectedEndpointJsonObject);
+        }
+        else
+        {   // Unknown type
+            selectedEndpointIDs = new ArrayList<>();
+        }
+
+        return selectedEndpointIDs;
     }
 
     /**
@@ -892,10 +978,16 @@ public class Endpoint
     {
         Object oldValue = getSctpConnection();
 
-        if ((sctpConnection == null)
-                ? (oldValue != null)
-                : !sctpConnection.equals(oldValue))
+        if (!Objects.equals(oldValue, sctpConnection))
         {
+            if (oldValue != null && sctpConnection != null)
+            {
+                // This is not necessarily invalid, but with the current
+                // codebase it likely indicates a problem. If we start to
+                // actually use it, this warning should be removed.
+                logger.warn("Replacing an Endpoint's SctpConnection.");
+            }
+
             this.sctpConnection = new WeakReference<>(sctpConnection);
 
             firePropertyChange(

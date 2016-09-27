@@ -16,6 +16,7 @@
 package org.jitsi.videobridge;
 
 import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
+import net.java.sip.communicator.impl.protocol.jabber.extensions.health.*;
 import net.java.sip.communicator.util.*;
 
 import org.jivesoftware.smack.packet.*;
@@ -65,19 +66,43 @@ public class FocusControlTest
         osgiHandler.stop();
     }
 
-    private static void expectResult(ColibriConferenceIQ confIq)
+    private static void expectResult(ColibriConferenceIQ confIq,
+                                     int processingOptions)
         throws Exception
     {
-        IQ respIq = bridge.handleColibriConferenceIQ(confIq);
+        IQ respIq = bridge.handleColibriConferenceIQ(confIq, processingOptions);
 
         assertEquals(IQ.Type.RESULT, respIq.getType());
         assertTrue(respIq instanceof ColibriConferenceIQ);
     }
 
-    private static void expectNotAuthorized(ColibriConferenceIQ confIq)
+    private static void expectResult(HealthCheckIQ healthIq)
         throws Exception
     {
-        IQ respIq = bridge.handleColibriConferenceIQ(confIq);
+        IQ respIq = bridge.handleHealthCheckIQ(healthIq);
+
+        assertEquals(IQ.Type.RESULT, respIq.getType());
+    }
+
+    private static void expectNotAuthorized(ColibriConferenceIQ confIq,
+                                            int processingOptions)
+        throws Exception
+    {
+        IQ respIq = bridge.handleColibriConferenceIQ(confIq, processingOptions);
+
+        Logger.getLogger(FocusControlTest.class).info(respIq.toXML());
+
+        assertNotNull(respIq);
+        assertEquals(IQ.Type.ERROR, respIq.getType());
+        assertEquals(
+            XMPPError.Condition.not_authorized.toString(),
+            respIq.getError().getCondition());
+    }
+
+    private static void expectNotAuthorized(HealthCheckIQ healthIq)
+        throws Exception
+    {
+        IQ respIq = bridge.handleHealthCheckIQ(healthIq);
 
         Logger.getLogger(FocusControlTest.class).info(respIq.toXML());
 
@@ -97,12 +122,11 @@ public class FocusControlTest
         throws Exception
     {
         String focusJid = "focusJid";
+        int options = 0;
 
         ColibriConferenceIQ confIq
             = ColibriUtilities.createConferenceIq(focusJid);
-        IQ respIq;
-
-        respIq = bridge.handleColibriConferenceIQ(confIq);
+        IQ respIq = bridge.handleColibriConferenceIQ(confIq);
 
         assertTrue(respIq instanceof ColibriConferenceIQ);
 
@@ -113,13 +137,20 @@ public class FocusControlTest
         // Only focus can access this conference now
         confIq.setFrom("someOtherJid");
         respIq = bridge.handleColibriConferenceIQ(confIq);
-        assertNull(respIq);
+        assertNotNull(respIq);
+        XMPPError error = respIq.getError();
+        assertNotNull(error);
+        // Should be 'not-allowed', but not easy to distinguish between
+        // "conference not found"and "invalid focus" errors in the Videobridge
+        // class without more refactoring
+        assertEquals(
+            XMPPError.Condition.bad_request.toString(), error.getCondition());
 
         // Expect 'not_authorized' error when no focus is provided
         // with default options
         confIq.setFrom(null);
 
-        expectNotAuthorized(confIq);
+        expectNotAuthorized(confIq, options);
     }
 
     /**
@@ -132,13 +163,11 @@ public class FocusControlTest
     {
         ColibriConferenceIQ confIq = ColibriUtilities.createConferenceIq(null);
         int options = Videobridge.OPTION_ALLOW_NO_FOCUS;
-        IQ respIq;
-        ColibriConferenceIQ respConfIq;
 
-        respIq = bridge.handleColibriConferenceIQ(confIq, options);
+        IQ respIq = bridge.handleColibriConferenceIQ(confIq, options);
         assertTrue(respIq instanceof ColibriConferenceIQ);
 
-        respConfIq = (ColibriConferenceIQ) respIq;
+        ColibriConferenceIQ respConfIq = (ColibriConferenceIQ) respIq;
 
         confIq.setID(respConfIq.getID());
 
@@ -160,14 +189,12 @@ public class FocusControlTest
         ColibriConferenceIQ confIq
             = ColibriUtilities.createConferenceIq(focusJid);
         int options = Videobridge.OPTION_ALLOW_ANY_FOCUS;
-        IQ respIq;
-        ColibriConferenceIQ respConfIq;
 
-        respIq = bridge.handleColibriConferenceIQ(confIq, options);
+        IQ respIq = bridge.handleColibriConferenceIQ(confIq, options);
 
         assertTrue(respIq instanceof ColibriConferenceIQ);
 
-        respConfIq = (ColibriConferenceIQ) respIq;
+        ColibriConferenceIQ respConfIq = (ColibriConferenceIQ) respIq;
 
         // Set conference id
         confIq.setID(respConfIq.getID());
@@ -192,20 +219,37 @@ public class FocusControlTest
         String authorizedRegExpr = "^focus@auth.domain.com/.*$";
         bridge.setAuthorizedSourceRegExp(authorizedRegExpr);
 
-        expectResult(
-            ColibriUtilities.createConferenceIq(
-                "focus@auth.domain.com/focus8969386508643465"));
+        // Make sure we run with no extra options to avoid test failures if
+        // we have defaults specified in the system
+        int processingOptions = 0;
 
         expectResult(
             ColibriUtilities.createConferenceIq(
-                "focus@auth.domain.com/fdsfwetg"));
+                "focus@auth.domain.com/focus8969386508643465"),
+            processingOptions);
+
+        expectResult(
+            ColibriUtilities.createConferenceIq(
+                "focus@auth.domain.com/fdsfwetg"),
+            processingOptions);
 
         expectNotAuthorized(
             ColibriUtilities.createConferenceIq(
-                "focus@auth2.domain.com/res1"));
+                "focus@auth2.domain.com/res1"),
+            processingOptions);
 
         expectNotAuthorized(
             ColibriUtilities.createConferenceIq(
-                "fdfsgv1@auth.domain23.com/pc3"));
+                "fdfsgv1@auth.domain23.com/pc3"),
+            processingOptions);
+
+        // Check for HealthCheckIQ
+        HealthCheckIQ healthCheckIQ = new HealthCheckIQ();
+
+        healthCheckIQ.setFrom("focus@auth.domain.com/fdsfwetg");
+        expectResult(healthCheckIQ);
+
+        healthCheckIQ.setFrom("focus@auth.domain4.com/fdsfwetg");
+        expectNotAuthorized(healthCheckIQ);
     }
 }

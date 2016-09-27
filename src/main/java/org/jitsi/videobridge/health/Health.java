@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.jitsi.videobridge.rest;
+package org.jitsi.videobridge.health;
 
 import java.io.*;
 import java.util.*;
@@ -39,7 +39,8 @@ public class Health
     /**
      * The {@link MediaType}s of {@link RtpChannel}s supported by
      * {@link Videobridge}. For example, {@link MediaType#DATA} is not supported
-     * by {@link Content#createRtpChannel(String, String, Boolean)}.
+     * by {@link
+     * Content#createRtpChannel(String, String, Boolean, RTPLevelRelayType)}.
      */
     private static final MediaType[] MEDIA_TYPES
         = { MediaType.AUDIO, MediaType.VIDEO };
@@ -95,23 +96,27 @@ public class Health
                     = content.createRtpChannel(
                             channelBundleId,
                             /* transportNamespace */ null,
-                            initiator);
+                            initiator,
+                            null);
 
                 // Fail as quickly as possible.
                 if (rtpChannel == null)
                     throw new NullPointerException();
+            }
 
-                // SctpConnection
-                SctpConnection sctpConnection
-                    = content.createSctpConnection(
-                            endpoint,
-                            /* sctpPort */ RANDOM.nextInt(),
-                            channelBundleId,
-                            initiator);
+            // SctpConnection
+            Content dataContent = conference.getOrCreateContent("data");
+            SctpConnection sctpConnection
+                = dataContent.createSctpConnection(
+                        endpoint,
+                        /* sctpPort */ RANDOM.nextInt(),
+                        channelBundleId,
+                        initiator);
 
-                // Fail as quickly as possible.
-                if (sctpConnection == null)
-                    throw new NullPointerException();
+            // Fail as quickly as possible.
+            if (sctpConnection == null)
+            {
+                throw new NullPointerException();
             }
         }
 
@@ -129,11 +134,15 @@ public class Health
      * of {@code videobridge} or the check determines that {@code videobridge}
      * is not healthy 
      */
-    private static void check(Videobridge videobridge)
+    public static void check(Videobridge videobridge)
         throws Exception
     {
         // Conference
-        Conference conference = videobridge.createConference(/* focus */ null);
+        Conference conference
+            = videobridge.createConference(
+                    /* focus */ null,
+                    /* name */ null,
+                    /* enableLogging */ false);
 
         // Fail as quickly as possible.
         if (conference == null)
@@ -299,11 +308,11 @@ public class Health
      * @throws IOException
      * @throws ServletException
      */
-    static void getJSON(
-            Videobridge videobridge,
-            Request baseRequest,
-            HttpServletRequest request,
-            HttpServletResponse response)
+    public static void getJSON(
+        Videobridge videobridge,
+        Request baseRequest,
+        HttpServletRequest request,
+        HttpServletResponse response)
         throws IOException,
                ServletException
     {

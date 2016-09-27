@@ -30,6 +30,7 @@ import net.sf.fmj.media.rtp.*;
 import net.sf.fmj.media.rtp.RTPHeader;
 
 import org.ice4j.socket.*;
+import org.jitsi.eventadmin.*;
 import org.jitsi.impl.neomedia.*;
 import org.jitsi.impl.neomedia.rtp.translator.*;
 import org.jitsi.impl.neomedia.transform.*;
@@ -42,7 +43,6 @@ import org.jitsi.service.neomedia.format.*;
 import org.jitsi.service.neomedia.recording.*;
 import org.jitsi.util.Logger;
 import org.jitsi.util.event.*;
-import org.jitsi.eventadmin.*;
 import org.jitsi.videobridge.transform.*;
 import org.jitsi.videobridge.xmpp.*;
 
@@ -64,10 +64,11 @@ public class RtpChannel
         = "org.jitsi.videobridge.DISABLE_ABS_SEND_TIME";
 
     /**
-     * The <tt>Logger</tt> used by the <tt>RtpChannel</tt> class and its
-     * instances to print debug information.
+     * The {@link Logger} used by the {@link RtpChannel} class to print debug
+     * information. Note that instances should use {@link #logger} instead.
      */
-    private static final Logger logger = Logger.getLogger(RtpChannel.class);
+    private static final Logger classLogger
+        = Logger.getLogger(RtpChannel.class);
 
     /**
      * An empty array of received synchronization source identifiers (SSRCs).
@@ -75,6 +76,11 @@ public class RtpChannel
      * of garbage collection.
      */
     private static final long[] NO_RECEIVE_SSRCS = new long[0];
+
+    /**
+     * The maximum number of SSRCs to accept on this channel. RTP packets arriving
+     */
+    private static final int MAX_RECEIVE_SSRCS = 50;
 
     /**
      * Gets the <tt>Channel</tt> which uses a specific <tt>MediaStream</tt>.
@@ -113,27 +119,6 @@ public class RtpChannel
     private final long initialLocalSSRC;
 
     /**
-     * The last known number of lost packets for this channel.
-     */
-    private long lastKnownPacketsLostNB = 0;
-
-    /**
-     * The last known number of packets that are received or sent for this
-     * channel.
-     */
-    private long lastKnownPacketsNB = 0;
-
-    /**
-     * The last known number of received bytes.
-     */
-    private long lastKnownReceivedBytes = 0;
-
-    /**
-     * The last known number of sent bytes.
-     */
-    private long lastKnownSentBytes = 0;
-
-    /**
      * The <tt>PropertyChangeListener</tt> which listens to
      * <tt>PropertyChangeEvent</tt>s.
      */
@@ -156,7 +141,13 @@ public class RtpChannel
      * <tt>RtpChannel</tt>. So in theory we should be able to get rid of one of
      * the two. TAG(cat4-remote-ssrc-hurricane).
      */
-    long[] receiveSSRCs = NO_RECEIVE_SSRCS;
+    private long[] receiveSSRCs = NO_RECEIVE_SSRCS;
+
+    /**
+     * The object used to synchronize access to {@link #receiveSSRCs} and
+     * {@link #signaledSSRCs}.
+     */
+    private final Object receiveSSRCsSyncRoot = new Object();
 
     /**
      * The type of RTP-level relay (in the terms specified by RFC 3550
@@ -211,14 +202,10 @@ public class RtpChannel
     RtpChannelTransformEngine transformEngine = null;
 
     /**
-     * Gets the <tt>TransformEngine</tt> of this <tt>RtpChannel</tt>.
-     *
-     * @return The <tt>TransformEngine</tt> of this <tt>RtpChannel</tt>.
+     * The {@link Logger} to be used by this instance to print debug
+     * information.
      */
-    public RtpChannelTransformEngine getTransformEngine()
-    {
-        return this.transformEngine;
-    }
+    private final Logger logger;
 
     /**
      * The FID (flow ID) groupings used by the remote side of this
@@ -274,12 +261,17 @@ public class RtpChannel
     {
         super(content, id, channelBundleId, transportNamespace, initiator);
 
+        logger
+            = Logger.getLogger(
+                    classLogger,
+                    content.getConference().getLogger());
+
         /*
          * In the case of content mixing, each Channel has its own local
          * synchronization source identifier (SSRC), which Jitsi Videobridge
          * pre-announces.
          */
-        initialLocalSSRC = Videobridge.RANDOM.nextLong() & 0xffffffffl;
+        initialLocalSSRC = Videobridge.RANDOM.nextLong() & 0xffffffffL;
 
         conferenceSpeechActivity
             = getContent().getConference().getSpeechActivity();
@@ -349,7 +341,7 @@ public class RtpChannel
         if (accept)
         {
             // Note that this Channel is still active.
-            touch();
+            touch(ActivityType.PAYLOAD /* control received */);
 
             /*
              * Does the data of the specified DatagramPacket resemble (a header
@@ -448,7 +440,7 @@ public class RtpChannel
         if (accept)
         {
             // Note that this Channel is still active.
-            touch();
+            touch(ActivityType.PAYLOAD /* data received */);
 
             /*
              * Does the data of the specified DatagramPacket resemble (a header
@@ -493,7 +485,19 @@ public class RtpChannel
                      * to the focus by the Jitsi Videobridge server.
                      */
                     int ssrc = RTPTranslatorImpl.readInt(data, off + 8);
-                    boolean notify = addReceiveSSRC(ssrc);
+                    boolean notify;
+
+                    try
+                    {
+                        notify = addReceiveSSRC(ssrc, true);
+                    }
+                    catch (SizeExceededException see)
+                    {
+                        // Drop the packet and do *not* trigger signalling
+                        // because of it.
+                        accept = false;
+                        notify = false;
+                    }
 
                     /*
                      * If a new SSRC has been detected on this channel, and a
@@ -516,7 +520,7 @@ public class RtpChannel
                                 if (synchronizer != null)
                                 {
                                     synchronizer.setEndpoint(
-                                            ssrc & 0xffffffffl,
+                                            ssrc & 0xffffffffL,
                                             endpoint.getID());
                                 }
                             }
@@ -537,14 +541,16 @@ public class RtpChannel
                         if (payloadTypes != null)
                         {
                             int pt = data[off + 1] & 0x7f;
-                            MediaFormat format
-                                = payloadTypes.get(Byte.valueOf((byte) pt));
+                            MediaFormat format = payloadTypes.get((byte) pt);
 
                             if ((format != null)
                                     && !format.equals(stream.getFormat()))
                             {
                                 stream.setFormat(format);
-                                stream.setDirection(MediaDirection.SENDRECV);
+                                synchronized (streamSyncRoot)
+                                {   // otherwise races with stream.start()
+                                    stream.setDirection(MediaDirection.SENDRECV);
+                                }
                                 notify = true;
                             }
                         }
@@ -567,11 +573,22 @@ public class RtpChannel
      *
      * @param receiveSSRC the RTP SSRC to be added to the list of SSRCs received
      * on this <tt>Channel</tt>
+     * @param checkLimit whether to check whether the number of receive SSRCs
+     * for the channel exceed the limit ({@link #MAX_RECEIVE_SSRCS}).
      * @return <tt>true</tt> if <tt>receiveSSRC</tt> was added to the list
      * (i.e. was not previously there); otherwise, <tt>false</tt>
+     * @throws org.jitsi.videobridge.RtpChannel.SizeExceededException if
+     * {@code checkLimit} is true and the number of SSRCs in {@link
+     * #receiveSSRCs} would have exceeded {@link #MAX_RECEIVE_SSRCS} with the
+     * addition of the new SSRC.
      */
-    private synchronized boolean addReceiveSSRC(int receiveSSRC)
+    private boolean addReceiveSSRC(int receiveSSRC,
+                                                boolean checkLimit)
+        throws SizeExceededException
     {
+        synchronized (receiveSSRCsSyncRoot)
+        {
+
         long now = System.currentTimeMillis();
 
         // contains
@@ -591,6 +608,11 @@ public class RtpChannel
             }
         }
 
+        if (checkLimit && length >= MAX_RECEIVE_SSRCS / 2)
+        {
+            throw new SizeExceededException();
+        }
+
         // add
         long[] newReceiveSSRCs = new long[length + 2];
 
@@ -600,6 +622,8 @@ public class RtpChannel
         receiveSSRCs = newReceiveSSRCs;
 
         return true;
+
+        } // synchronized (receiveSSRCsSyncRoot)
     }
 
     /**
@@ -629,7 +653,7 @@ public class RtpChannel
                 = getContent().getRTCPFeedbackMessageSender();
 
             if (rtcpFeedbackMessageSender != null)
-                rtcpFeedbackMessageSender.sendFIR(stream, receiveSSRCs);
+                rtcpFeedbackMessageSender.sendFIR(receiveSSRCs);
         }
     }
 
@@ -696,13 +720,8 @@ public class RtpChannel
      * identified a speaker switch event in the multipoint conference and there
      * is now a new dominant speaker.
      */
-    private void dominantSpeakerChanged()
+    protected void dominantSpeakerChanged()
     {
-        /*
-         * TODO Invoke conferenceSpeechActivity.getDominantEndpoint() and, for
-         * example, notify the Jitsi Videobridge client about the dominance
-         * switch to a new speaker.
-         */
     }
 
     /**
@@ -754,59 +773,6 @@ public class RtpChannel
     }
 
     /**
-     * Returns the number of lost packets for this channel since last time the
-     * method is called.
-     *
-     * Note: {@link org.jitsi.videobridge.stats.VideobridgeStatistics} uses this
-     * method and it relies on the fact that the method is not called from
-     * anywhere else. This should probably be refactored.
-     *
-     * @return the number of lost packets since last time the method is called.
-     */
-    public long getLastPacketsLostNB()
-    {
-        long newPacketsLost = stream.getMediaStreamStats().getNbPacketsLost();
-        long lastPacketsNB = newPacketsLost - lastKnownPacketsLostNB;
-
-        if (lastPacketsNB < 0)
-        {
-            return 0;
-        }
-        else
-        {
-            lastKnownPacketsLostNB = newPacketsLost;
-            return lastPacketsNB;
-        }
-    }
-
-    /**
-     * Returns the number of packets that are sent or received for this channel
-     * since last time the method is called.
-     *
-     * Note: {@link org.jitsi.videobridge.stats.VideobridgeStatistics} uses this
-     * method and it relies on the fact that the method is not called from
-     * anywhere else. This should probably be refactored.
-     *
-     * @return  the number of packets that are sent or received since last time
-     * the method is called.
-     */
-    public long getLastPacketsNB()
-    {
-        long newPackets = stream.getMediaStreamStats().getNbPackets();
-        long lastPacketsNB = newPackets - lastKnownPacketsNB;
-
-        if (lastPacketsNB < 0)
-        {
-            return 0;
-        }
-        else
-        {
-            lastKnownPacketsNB = newPackets;
-            return lastPacketsNB;
-        }
-    }
-
-    /**
      * Returns a <tt>MediaService</tt> implementation (if any).
      *
      * @return a <tt>MediaService</tt> implementation (if any).
@@ -817,62 +783,16 @@ public class RtpChannel
     }
 
     /**
-     * Returns the number of received bytes since the last time the
-     * method was called.
-     *
-     * Note: {@link org.jitsi.videobridge.stats.VideobridgeStatistics} uses this
-     * method and it relies on the fact that the method is not called from
-     * anywhere else. This should probably be refactored.
-     *
-     * @return the number of received bytes.
-     */
-    public long getNBReceivedBytes()
-    {
-        long bytes = 0;
-        long newBytes = stream.getMediaStreamStats().getNbReceivedBytes();
-        if(newBytes > lastKnownReceivedBytes)
-        {
-            bytes += newBytes - lastKnownReceivedBytes;
-            lastKnownReceivedBytes = newBytes;
-        }
-
-        return bytes;
-    }
-
-    /**
-     * Returns the number of sent bytes since the last time the
-     * method was called.
-     *
-     * Note: {@link org.jitsi.videobridge.stats.VideobridgeStatistics} uses this
-     * method and it relies on the fact that the method is not called from
-     * anywhere else. This should probably be refactored.
-     *
-     * @return the number of sent bytes.
-     */
-    public long getNBSentBytes()
-    {
-        long bytes = 0;
-
-        long newBytes = stream.getMediaStreamStats().getNbSentBytes();
-
-        if(newBytes > lastKnownSentBytes)
-        {
-            bytes += newBytes - lastKnownSentBytes;
-            lastKnownSentBytes = newBytes;
-        }
-
-        return bytes;
-    }
-
-    /**
      * Gets a list of the RTP SSRCs received on this <tt>Channel</tt>.
      *
      * @return an array of <tt>int</tt>s which represents a list of the RTP
      * SSRCs received on this <tt>Channel</tt>
      */
-    public synchronized int[] getReceiveSSRCs()
+    public int[] getReceiveSSRCs()
     {
-        final int length = this.receiveSSRCs.length;
+        // this.receiveSSRCs is copy-on-write.
+        long[] receiveSSRCsField = this.receiveSSRCs;
+        int length = receiveSSRCsField.length;
 
         if (length == 0)
         {
@@ -883,7 +803,9 @@ public class RtpChannel
             int[] receiveSSRCs = new int[length / 2];
 
             for (int src = 0, dst = 0; src < length; src += 2, dst++)
-                receiveSSRCs[dst] = (int) this.receiveSSRCs[src];
+            {
+                receiveSSRCs[dst] = (int) receiveSSRCsField[src];
+            }
             return receiveSSRCs;
         }
     }
@@ -946,6 +868,12 @@ public class RtpChannel
     public void initialize()
         throws IOException
     {
+        initialize(null);
+    }
+
+    void initialize(RTPLevelRelayType rtpLevelRelayType)
+        throws IOException
+    {
         super.initialize();
 
         MediaService mediaService = getMediaService();
@@ -968,6 +896,21 @@ public class RtpChannel
             if (transformEngine != null)
                 stream.setExternalTransformer(transformEngine);
 
+            /*
+             * The attribute rtp-level-relay-type specifies the
+             * vale of pretty much the most important Channel
+             * property given that Jitsi Videobridge implements
+             * an RTP-level relay. Consequently, it is
+             * intuitively a sign of common sense to take the
+             * value into account as possible.
+             *
+             * The attribute rtp-level-relay-type is optional.
+             * If a value is not specified, then the Channel
+             * rtpLevelRelayType is to not be changed.
+             */
+            if (rtpLevelRelayType != null)
+                setRTPLevelRelayType(rtpLevelRelayType);
+
             // The transport manager could be already connected, in which case
             // (since we just created the stream), any previous calls to
             // transportConnected() have failed started the stream. So trigger
@@ -978,6 +921,22 @@ public class RtpChannel
                 transportConnected();
             }
         }
+    }
+
+    /**
+     * Initializes the <tt>RtpChannelTransformEngine</tt> that will be used by
+     * this <tt>RtpChannel</tt>.
+     *
+     * @return the just created <tt>RtpChannelTransformEngine</tt> instance.
+     */
+    RtpChannelTransformEngine initializeTransformerEngine()
+    {
+        transformEngine = new RtpChannelTransformEngine(this);
+        if (stream != null)
+        {
+            stream.setExternalTransformer(transformEngine);
+        }
+        return transformEngine;
     }
 
     /**
@@ -1001,40 +960,45 @@ public class RtpChannel
                 return;
         }
 
-        // connector
-        StreamConnector connector = getStreamConnector();
+        RetransmissionRequester retransmissionRequester
+            = stream.getRetransmissionRequester();
+        if (retransmissionRequester != null)
+            retransmissionRequester.setSenderSsrc(getContent().getInitialLocalSSRC());
 
-        if (connector == null)
-            return;
-        else
-            stream.setConnector(connector);
-
-        // target
         MediaStreamTarget streamTarget = createStreamTarget();
+        StreamConnector connector = getStreamConnector();
+        if (connector == null)
+        {
+            logger.info("Not starting stream, connector is null");
+            return;
+        }
 
         if (streamTarget != null)
         {
             InetSocketAddress dataAddr = streamTarget.getDataAddress();
-
-            if (dataAddr != null)
+            if (dataAddr == null)
             {
-                this.streamTarget.setDataHostAddress(dataAddr.getAddress());
-                this.streamTarget.setDataPort(dataAddr.getPort());
+                logger.info(
+                        "Not starting stream, the target's data address is null");
+                return;
             }
 
-            InetSocketAddress ctrlAddr = streamTarget.getControlAddress();
+            this.streamTarget.setDataHostAddress(dataAddr.getAddress());
+            this.streamTarget.setDataPort(dataAddr.getPort());
 
+            InetSocketAddress ctrlAddr = streamTarget.getControlAddress();
             if (ctrlAddr != null)
             {
                 this.streamTarget.setControlHostAddress(ctrlAddr.getAddress());
                 this.streamTarget.setControlPort(ctrlAddr.getPort());
             }
 
-            if (dataAddr != null)
-                stream.setTarget(streamTarget);
+            stream.setTarget(streamTarget);
         }
+        stream.setConnector(connector);
 
         Content content = getContent();
+        Conference conference = content.getConference();
 
         if (!stream.isStarted())
         {
@@ -1048,15 +1012,15 @@ public class RtpChannel
             if (RTPLevelRelayType.MIXER.equals(getRTPLevelRelayType()))
                 stream.setSSRCFactory(new SSRCFactoryImpl(initialLocalSSRC));
 
-            stream.start();
-
-            Videobridge videobridge
-                = getContent().getConference().getVideobridge();
-            EventAdmin eventAdmin = videobridge.getEventAdmin();
-            if (eventAdmin != null && streamTarget != null)
+            synchronized (streamSyncRoot) // Otherwise, races with stream.setDirection().
             {
-                eventAdmin
-                    .sendEvent(EventFactory.streamStarted(this));
+                stream.start();
+            }
+
+            EventAdmin eventAdmin = conference.getEventAdmin();
+            if (eventAdmin != null)
+            {
+                eventAdmin.sendEvent(EventFactory.streamStarted(this));
             }
         }
 
@@ -1065,11 +1029,9 @@ public class RtpChannel
             logger.trace(
                     "Direction of channel " + getID() + " of content "
                         + content.getName() + " of conference "
-                        + content.getConference().getID() + " is "
+                        + conference.getID() + " is "
                         + stream.getDirection() + ".");
         }
-
-        touch(); // It seems this Channel is still active.
     }
 
     /**
@@ -1156,8 +1118,6 @@ public class RtpChannel
     {
         Object source = ev.getSource();
 
-        // At the time of writing this doesn't do anything (dominantSpeakerChanged
-        // is empty in all Channel implementations). Should we remove it if it is unused?
         if ((conferenceSpeechActivity == source)
                 && (conferenceSpeechActivity != null))
         {
@@ -1180,10 +1140,14 @@ public class RtpChannel
      * @return <tt>true</tt> if <tt>receiveSSRC</tt> was found in the list of
      * SSRCs received on this <tt>Channel</tt>; otherwise, <tt>false</tt>
      */
-    private synchronized boolean removeReceiveSSRC(int receiveSSRC)
+    private boolean removeReceiveSSRC(int receiveSSRC)
     {
-        final int length = receiveSSRCs.length;
         boolean removed = false;
+
+        synchronized (receiveSSRCsSyncRoot)
+        {
+
+        final int length = receiveSSRCs.length;
 
         if (length == 2)
         {
@@ -1221,6 +1185,8 @@ public class RtpChannel
                 }
             }
         }
+
+        } // synchronized (receiveSSRCsSyncRoot)
 
         return removed;
     }
@@ -1409,7 +1375,7 @@ public class RtpChannel
                 redPayloadType = -1;
                 for (PayloadTypePacketExtension ext : payloadTypes)
                 {
-                    if ("rtx".equalsIgnoreCase(ext.getName()))
+                    if (Constants.RTX.equalsIgnoreCase(ext.getName()))
                     {
                         rtxPayloadType = (byte) ext.getID();
                         for (ParameterPacketExtension ppe : ext.getParameters())
@@ -1425,6 +1391,14 @@ public class RtpChannel
                     {
                         redPayloadType = (byte) ext.getID();
                     }
+                }
+
+                RetransmissionRequester retransmissionRequester
+                    = stream.getRetransmissionRequester();
+                if (retransmissionRequester != null)
+                {
+                    retransmissionRequester.configureRtx(rtxPayloadType,
+                                                         fidSourceGroups);
                 }
             }
         }
@@ -1700,12 +1674,13 @@ public class RtpChannel
      * used as the input in the update of the Sets the <tt>Set</tt> of the SSRCs
      * that this <tt>RtpChannel</tt> has signaled.
      */
-    public synchronized void setSources(List<SourcePacketExtension> sources)
+    public void setSources(List<SourcePacketExtension> sources)
     {
         if (sources == null || sources.isEmpty())
-        {
             return;
-        }
+
+        synchronized (receiveSSRCsSyncRoot)
+        {
 
         Set<Integer> oldSignaledSSRCs = new HashSet<>(signaledSSRCs);
 
@@ -1713,11 +1688,9 @@ public class RtpChannel
         Set<Integer> newSignaledSSRCs = new HashSet<>();
         for (SourcePacketExtension source : sources)
         {
-            int ssrc = (int) source.getSSRC();
+            long ssrc = source.getSSRC();
             if (ssrc != -1)
-            {
-                newSignaledSSRCs.add((int) source.getSSRC());
-            }
+                newSignaledSSRCs.add((int) ssrc);
         }
 
         // Add the added SSRCs.
@@ -1725,9 +1698,38 @@ public class RtpChannel
         addedSSRCs.removeAll(oldSignaledSSRCs);
         if (!addedSSRCs.isEmpty())
         {
+
+            Recorder recorder = null;
+            Synchronizer synchronizer = null;
+            Endpoint endpoint = null;
+            if (getContent().isRecording())
+            {
+                recorder = getContent().getRecorder();
+                synchronizer = recorder.getSynchronizer();
+                endpoint = getEndpoint();
+            }
+
             for (Integer addedSSRC : addedSSRCs)
             {
-                addReceiveSSRC(addedSSRC);
+                try
+                {
+                    // Do allow the number of explicitly signalled SSRCs to
+                    // exceed the limit.
+                    addReceiveSSRC(addedSSRC, false);
+
+                    // If recording is enabled, we need to add the mapping from
+                    // SSRC to EndpointID into the Synchronizer
+                    // instance used by RecorderRtpImpl.
+                    if (recorder != null && endpoint != null && synchronizer != null)
+                    {
+                        synchronizer.setEndpoint(addedSSRC & 0xffffffffl,
+                            endpoint.getID());
+                    }
+                }
+                catch (SizeExceededException see)
+                {
+                    // Never thrown with checkLimit=false.
+                }
             }
         }
 
@@ -1736,13 +1738,13 @@ public class RtpChannel
         if (!oldSignaledSSRCs.isEmpty())
         {
             for (Integer removedSSRC : oldSignaledSSRCs)
-            {
                 removeReceiveSSRC(removedSSRC);
-            }
         }
 
         // Set the newly signaled ssrcs.
         signaledSSRCs = newSignaledSSRCs;
+
+        } // synchronized (receiveSSRCsSyncRoot)
 
         touch(); // It seems this Channel is still active.
     }
@@ -1794,6 +1796,15 @@ public class RtpChannel
                 fidSourceGroups.put(first, second);
             }
         }
+
+        // The RTX configuration (PT and SSRC maps) may have changed.
+        RetransmissionRequester retransmissionRequester
+            = stream.getRetransmissionRequester();
+        if (retransmissionRequester != null)
+        {
+            retransmissionRequester.configureRtx(rtxPayloadType,
+                                                 fidSourceGroups);
+        }
     }
 
     /**
@@ -1808,21 +1819,8 @@ public class RtpChannel
     }
 
     /**
-     * Sets the <tt>RtpChannelTransformEngine</tt> to be used by this
-     * <tt>RtpChannel</tt>.
-     * @param transformEngine the <tt>RtpChannelTransformEngine</tt> to set.
-     */
-    void setTransformEngine(RtpChannelTransformEngine transformEngine)
-    {
-        if (this.transformEngine != transformEngine)
-        {
-            this.transformEngine = transformEngine;
-            if (stream != null)
-                stream.setExternalTransformer(transformEngine);
-        }
-    }
-
-    /**
+     * {@inheritDoc}
+     *
      * Closes {@link #transformEngine}. Normally this would be done by
      * {@link #stream} when it is being closed, but we have observed cases (e.g.
      * when running health checks) where it doesn't happen, and since
@@ -1830,8 +1828,35 @@ public class RtpChannel
      * assumes the responsibility of releasing its resources.
      */
     @Override
-    public void expire()
+    public boolean expire()
     {
+        if (!super.expire())
+        {
+            // Already expired.
+            return false;
+        }
+
+        if (getContent().getConference().includeInStatistics())
+        {
+            Conference.Statistics conferenceStatistics
+                = getContent().getConference().getStatistics();
+            conferenceStatistics.totalChannels.incrementAndGet();
+
+            long lastPayloadActivityTime = getLastPayloadActivityTime();
+            long lastTransportActivityTime = getLastTransportActivityTime();
+
+            if (lastTransportActivityTime == 0)
+            {
+                // Check for ICE failures.
+                conferenceStatistics.totalNoTransportChannels.incrementAndGet();
+            }
+
+            if (lastPayloadActivityTime == 0)
+            {
+                // Check for payload.
+                conferenceStatistics.totalNoPayloadChannels.incrementAndGet();
+            }
+        }
         TransformEngine transformEngine = this.transformEngine;
         if (transformEngine != null)
         {
@@ -1848,7 +1873,7 @@ public class RtpChannel
             }
         }
 
-        super.expire();
+        return true;
     }
 
     /**
@@ -1914,4 +1939,45 @@ public class RtpChannel
     {
         return conferenceSpeechActivity;
     }
+
+    /**
+     * Sets a delay of the RTP stream expressed in a number of packets.
+     * The property is immutable which means than once set can not be changed
+     * later.
+     *
+     * *NOTE* that this delay is meant to be used only for audio and video
+     * synchronization tests and should never be used in production.
+     *
+     * @param packetDelay tells by how many packets RTP stream should be
+     * delayed. Will have effect only if greater than 0.
+     *
+     * @return <tt>true</tt> if the delay has been set or <tt>false</tt>
+     * otherwise.
+     */
+    public boolean setPacketDelay(int packetDelay)
+    {
+        RtpChannelTransformEngine engine = this.transformEngine;
+        if (engine == null)
+        {
+            engine = initializeTransformerEngine();
+        }
+        return engine.setPacketDelay(packetDelay);
+    }
+
+    /**
+     * Gets the <tt>TransformEngine</tt> of this <tt>RtpChannel</tt>.
+     *
+     * @return The <tt>TransformEngine</tt> of this <tt>RtpChannel</tt>.
+     */
+    public RtpChannelTransformEngine getTransformEngine()
+    {
+        return this.transformEngine;
+    }
+
+
+    /**
+     * An exception indicating that the maximum size of something was exceeded.
+     */
+    private static class SizeExceededException extends Exception
+    {}
 }

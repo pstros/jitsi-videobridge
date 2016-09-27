@@ -19,6 +19,7 @@ import java.util.*;
 
 import net.java.sip.communicator.impl.protocol.jabber.*;
 import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
+import net.java.sip.communicator.impl.protocol.jabber.extensions.health.*;
 import net.java.sip.communicator.util.*;
 
 import org.jitsi.meet.*;
@@ -141,15 +142,15 @@ public class ComponentImpl
             new String[]
                     {
                         ColibriConferenceIQ.NAMESPACE,
+                        HealthCheckIQ.NAMESPACE,
                         ProtocolProviderServiceJabberImpl
                             .URN_XMPP_JINGLE_DTLS_SRTP,
                         ProtocolProviderServiceJabberImpl
                             .URN_XMPP_JINGLE_ICE_UDP_1,
                         ProtocolProviderServiceJabberImpl
                             .URN_XMPP_JINGLE_RAW_UDP_0,
-                        // TODO this should be a constant in
-                        // ProtocolProviderServiceJabberImpl.
-                        "jabber:iq:version"
+                        ProtocolProviderServiceJabberImpl
+                            .URN_XMPP_IQ_VERSION
                     };
     }
 
@@ -239,56 +240,6 @@ public class ComponentImpl
     }
 
     /**
-     * Handles a <tt>ColibriConferenceIQ</tt> stanza which represents a request.
-     *
-     * @param conferenceIQ the <tt>ColibriConferenceIQ</tt> stanza represents
-     * the request to handle
-     * @return an <tt>org.jivesoftware.smack.packet.IQ</tt> stanza which
-     * represents the response to the specified request or <tt>null</tt> to
-     * reply with <tt>feature-not-implemented</tt>
-     * @throws Exception to reply with <tt>internal-server-error</tt> to the
-     * specified request
-     */
-    private org.jivesoftware.smack.packet.IQ handleColibriConferenceIQ(
-            ColibriConferenceIQ conferenceIQ)
-        throws Exception
-    {
-        Videobridge videobridge = getVideobridge();
-        org.jivesoftware.smack.packet.IQ iq;
-
-        if (videobridge == null)
-            iq = null;
-        else
-            iq = videobridge.handleColibriConferenceIQ(conferenceIQ);
-        return iq;
-    }
-
-    /**
-     * Handles a <tt>ShutdownIQ</tt> stanza which represents a request.
-     *
-     * @param shutdownIQ the <tt>ShutdownIQ</tt> stanza represents the request
-     *                   to handle
-     * @return an <tt>org.jivesoftware.smack.packet.IQ</tt> stanza which
-     * represents the response to the specified request or <tt>null</tt> to
-     * reply with <tt>feature-not-implemented</tt>
-     * @throws Exception to reply with <tt>internal-server-error</tt> to the
-     * specified request
-     */
-    private org.jivesoftware.smack.packet.IQ handleShutdownIQ(
-            ShutdownIQ shutdownIQ)
-        throws Exception
-    {
-        Videobridge videobridge = getVideobridge();
-        org.jivesoftware.smack.packet.IQ iq;
-
-        if (videobridge == null)
-            iq = null;
-        else
-            iq = videobridge.handleShutdownIQ(shutdownIQ);
-        return iq;
-    }
-
-    /**
      * Handles an <tt>org.xmpp.packet.IQ</tt> stanza of type <tt>get</tt> or
      * <tt>set</tt> which represents a request. Converts the specified
      * <tt>org.xmpp.packet.IQ</tt> to an
@@ -313,6 +264,27 @@ public class ComponentImpl
             logd("RECV: " + iq.toXML());
 
             org.jivesoftware.smack.packet.IQ smackIQ = IQUtils.convert(iq);
+            // Failed to convert to Smack IQ ?
+            if (smackIQ == null)
+            {
+                if (iq.isRequest())
+                {
+                    IQ error = new IQ(IQ.Type.error, iq.getID());
+                    error.setFrom(iq.getTo());
+                    error.setTo(iq.getFrom());
+                    error.setError(
+                            new PacketError(
+                                    PacketError.Condition.bad_request,
+                                    PacketError.Type.modify,
+                                    "Failed to parse incoming stanza"));
+                    return error;
+                }
+                else
+                {
+                    logger.error("Failed to convert stanza: " + iq.toXML());
+                }
+            }
+
             org.jivesoftware.smack.packet.IQ resultSmackIQ = handleIQ(smackIQ);
             IQ resultIQ;
 
@@ -421,23 +393,46 @@ public class ComponentImpl
             org.jivesoftware.smack.packet.IQ request)
         throws Exception
     {
-        /*
-         * Requests can be categorized in pieces of Videobridge functionality
-         * based on the org.jivesoftware.smack.packet.IQ runtime type (of their
-         * child element) and forwarded to specialized Videobridge methods for
-         * convenience.
-         */
+        // Requests can be categorized in pieces of Videobridge functionality
+        // based on the org.jivesoftware.smack.packet.IQ runtime type (of their
+        // child element) and forwarded to specialized Videobridge methods for
+        // convenience.
+        if (request instanceof org.jivesoftware.smackx.packet.Version)
+        {
+            return
+                handleVersionIQ(
+                        (org.jivesoftware.smackx.packet.Version) request);
+        }
+
+        Videobridge videobridge = getVideobridge();
+        if (videobridge == null)
+        {
+            return IQUtils.createError(
+                    request,
+                    XMPPError.Condition.interna_server_error,
+                    "No Videobridge service is running");
+        }
+
         org.jivesoftware.smack.packet.IQ response;
 
         if (request instanceof ColibriConferenceIQ)
-            response = handleColibriConferenceIQ((ColibriConferenceIQ) request);
+        {
+            response
+                = videobridge.handleColibriConferenceIQ(
+                        (ColibriConferenceIQ) request);
+        }
+        else if (request instanceof HealthCheckIQ)
+        {
+            response = videobridge.handleHealthCheckIQ((HealthCheckIQ) request);
+        }
         else if (request instanceof ShutdownIQ)
-            response = handleShutdownIQ((ShutdownIQ) request);
-        else if (request instanceof org.jivesoftware.smackx.packet.Version)
-            response = handleVersionIQ(
-                (org.jivesoftware.smackx.packet.Version) request);
+        {
+            response = videobridge.handleShutdownIQ((ShutdownIQ) request);
+        }
         else
+        {
             response = null;
+        }
         return response;
     }
 
@@ -450,7 +445,7 @@ public class ComponentImpl
      * represents the response to the specified request.
      */
     private org.jivesoftware.smack.packet.IQ handleVersionIQ(
-        org.jivesoftware.smackx.packet.Version versionRequest)
+            org.jivesoftware.smackx.packet.Version versionRequest)
     {
         VersionService versionService = getVersionService();
         if (versionService == null)

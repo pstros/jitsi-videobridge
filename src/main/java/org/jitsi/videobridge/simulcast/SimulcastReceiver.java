@@ -15,6 +15,8 @@
  */
 package org.jitsi.videobridge.simulcast;
 
+import org.jitsi.impl.neomedia.codec.video.vp8.*;
+import org.jitsi.service.configuration.*;
 import org.jitsi.impl.neomedia.*;
 import org.jitsi.util.*;
 import java.util.concurrent.*;
@@ -36,10 +38,11 @@ import java.util.*;
 public class SimulcastReceiver
 {
     /**
-     * The <tt>Logger</tt> used by the <tt>ReceivingStreams</tt> class and its
-     * instances to print debug information.
+     * The {@link Logger} used by the {@link SimulcastReceiver} class to print
+     * debug information. Note that instances should use {@link #logger}
+     * instead.
      */
-    private static final Logger logger
+    private static final Logger classLogger
             = Logger.getLogger(SimulcastReceiver.class);
 
     /**
@@ -48,7 +51,50 @@ public class SimulcastReceiver
      * from its remote peer or it will be declared paused/stopped/not streaming
      * by its {@code SimulcastReceiver}.
      */
-    private static final int TIMEOUT_ON_FRAME_COUNT = 5;
+    private static int TIMEOUT_ON_FRAME_COUNT = -1; // -1 means uninitialized
+
+    /**
+     * The default value for TIMEOUT_ON_FRAME_COUNT if the config not specifies
+     * it
+     */
+    private static final int DEFAULT_TIMEOUT_ON_FRAME_COUNT = 5;
+
+    /**
+     * Configuration key for TIMEOUT_ON_FRAME_COUNT
+     */
+    private static final String TIMEOUT_ON_FRAME_COUNT_CONFIG_KEY
+        = "org.jitsi.videobridge.simulcast.SimulcastReceiver"
+               + ".TIMEOUT_ON_FRAME_COUNT";
+
+    /**
+     * Reads TIMEOUT_ON_FRAME_COUNT from the <tt>ConfigurationService</tt>
+     *
+     * @param cfg The global <tt>ConfigurationService</tt> object
+     */
+    private static void initializeConfiguration(ConfigurationService cfg) {
+        if (cfg == null)
+        {
+            classLogger.warn("Can't set TIMEOUT_ON_FRAME_COUNT because "
+                            + "the configuration service was not found. "
+                            + "Using " + DEFAULT_TIMEOUT_ON_FRAME_COUNT
+                            + " as default");
+
+            TIMEOUT_ON_FRAME_COUNT = DEFAULT_TIMEOUT_ON_FRAME_COUNT;
+        }
+        else
+        {
+            TIMEOUT_ON_FRAME_COUNT = cfg.getInt(
+                TIMEOUT_ON_FRAME_COUNT_CONFIG_KEY,
+                DEFAULT_TIMEOUT_ON_FRAME_COUNT);
+        }
+    }
+
+    /**
+     * The pool of threads utilized by this class. This could be a private
+     * static final field but we want to be able to override it for testing.
+     */
+    static ExecutorService executorService = ExecutorUtils
+        .newCachedThreadPool(true, SimulcastReceiver.class.getName());
 
     /**
      * The list of listeners to be notified by this receiver when a change in
@@ -65,19 +111,13 @@ public class SimulcastReceiver
         = new CopyOnWriteArrayList<>();
 
     /**
-     * The pool of threads utilized by this class. This could be a private
-     * static final field but we want to be able to override it for testing.
-     */
-    static ExecutorService executorService = ExecutorUtils
-        .newCachedThreadPool(true, SimulcastReceiver.class.getName());
-
-    /**
      * The <tt>SimulcastEngine</tt> that owns this receiver.
      */
     private final SimulcastEngine simulcastEngine;
 
     /**
-     * The simulcast stream of this <tt>VideoChannel</tt>.
+     * The simulcast streams of this {@link SimulcastReceiver}. This array is
+     * supposed to be immutable.
      */
     private SimulcastStream[] simulcastStreams;
 
@@ -86,18 +126,33 @@ public class SimulcastReceiver
      * {@link #simulcastStreams}. Used in an attempt to speed up the detection
      * of paused/stopped {@code SimulcastStream}s by counting (video) frames.
      */
-    private final List<SimulcastStream> simulcastStreamFrameHistory
+    private List<SimulcastStream> simulcastStreamFrameHistory
         = new LinkedList<>();
+
+    /**
+     * The {@link Logger} to be used by this instance to print debug
+     * information.
+     */
+    private final Logger logger;
 
     /**
      * Ctor.
      *
      * @param simulcastEngine the <tt>SimulcastEngine</tt> that owns this
      * receiver.
+     * @param cfg Needed to read TIMEOUT_ON_FRAME_COUNT
      */
-    public SimulcastReceiver(SimulcastEngine simulcastEngine)
+    public SimulcastReceiver(SimulcastEngine simulcastEngine,
+                             ConfigurationService cfg)
     {
+        if (TIMEOUT_ON_FRAME_COUNT < 0) // Initialize config only once
+        {
+            initializeConfiguration(cfg);
+        }
+
         this.simulcastEngine = simulcastEngine;
+        this.logger
+            = Logger.getLogger(classLogger, simulcastEngine.getLogger());
     }
 
     /**
@@ -111,9 +166,9 @@ public class SimulcastReceiver
     }
 
     /**
-     * Returns true if the endpoint has signaled two or more simulcast streams.
+     * Returns true if the endpoint has signaled one or more simulcast streams.
      *
-     * @return true if the endpoint has signaled two or more simulcast streams,
+     * @return true if the endpoint has signaled one or more simulcast streams,
      * false otherwise.
      */
     public boolean isSimulcastSignaled()
@@ -178,7 +233,7 @@ public class SimulcastReceiver
             streams = new SimulcastStream[ssrcs.length];
             for (int i = 0; i < ssrcs.length; i++)
             {
-                streams[i] = new SimulcastStream(this, ssrcs[i], i);
+                streams[i] = new SimulcastStream(this, ssrcs[i], -1, -1, i);
             }
         }
 
@@ -188,32 +243,49 @@ public class SimulcastReceiver
     /**
      * Sets the simulcast streams for this receiver and fires an event about it.
      *
-     * @param simulcastStreams the simulcast streams for this receiver.
+     * @param newSimulcastStreams the simulcast streams for this receiver.
      */
-    public void setSimulcastStreams(SimulcastStream[] simulcastStreams)
+    public void setSimulcastStreams(SimulcastStream[] newSimulcastStreams)
     {
-        this.simulcastStreams = simulcastStreams;
+        SimulcastStream[] oldSimulcastStreams = this.simulcastStreams;
+
+        int oldLen
+            = oldSimulcastStreams == null ? 0 : oldSimulcastStreams.length;
+        int newLen
+            = newSimulcastStreams == null ? 0 : newSimulcastStreams.length;
+
+        // XXX Arrays.equals is doing null checks for us.
+        if ((oldLen == 0 && newLen == 0)
+            || Arrays.equals(oldSimulcastStreams, newSimulcastStreams))
+        {
+            return;
+        }
+
+        synchronized (this)
+        {
+            this.simulcastStreams = newSimulcastStreams;
+            // If simulcastStreams has changed, then simulcastStreamFrameHistory
+            // has very likely become irrelevant. In other words, clear
+            // simulcastStreamFrameHistory.
+            this.simulcastStreamFrameHistory = new LinkedList<>();
+        }
 
         if (logger.isInfoEnabled())
         {
-            if (simulcastStreams == null)
+            if (newSimulcastStreams == null)
             {
                 logger.info("Simulcast disabled.");
             }
             else
             {
-                for (SimulcastStream l : simulcastStreams)
+                for (SimulcastStream l : newSimulcastStreams)
                 {
                     logger.info(l.getOrder() + ": " + l.getPrimarySSRC());
                 }
             }
         }
 
-       fireSimulcastStreamsSignaled();
-
-        // TODO If simulcastStreams has changed, then
-        // simulcastStreamFrameHistory has very likely become irrelevant. In
-        // other words, clear simulcastStreamFrameHistory.
+        fireSimulcastStreamsSignaled();
     }
 
     /**
@@ -239,6 +311,9 @@ public class SimulcastReceiver
      */
     public void accepted(RawPacket pkt)
     {
+        // FIXME we should split this method (in a meaningful way) because it is
+        // way too long.
+
         // With native simulcast we don't have a notification when a stream
         // has started/stopped. The simulcast manager implements a timeout
         // for the high quality stream and it needs to be notified when
@@ -250,7 +325,15 @@ public class SimulcastReceiver
             return;
         }
 
-        SimulcastStream[] simStreams = getSimulcastStreams();
+        SimulcastStream[] simStreams;
+        List<SimulcastStream> localSimulcastStreamFrameHistory;
+
+        synchronized (this)
+        {
+            simStreams = this.simulcastStreams;
+            localSimulcastStreamFrameHistory = this.simulcastStreamFrameHistory;
+        }
+
         if (simStreams == null || simStreams.length == 0)
         {
             return;
@@ -315,12 +398,20 @@ public class SimulcastReceiver
         // marker bit set. Since the RTP packet with the set marker bit may get
         // lost, it sounds more reliably to distinguish frames by looking at the
         // timestamps of the RTP packets.
-        long pktTimestamp = pkt.readUnsignedIntAsLong(4);
+        long pktTimestamp = pkt.getTimestamp();
         boolean frameStarted = false;
+        Boolean isKeyFrame = null;
 
-        if (acceptedStream.lastPktTimestamp <= pktTimestamp)
+        if (logger.isInfoEnabled() && (isKeyFrame = isKeyFrame(pkt)))
         {
-            if (acceptedStream.lastPktTimestamp < pktTimestamp)
+            logger.info("Received a keyframe on SSRC=" + acceptedSSRC);
+        }
+
+        if (acceptedStream.lastPktTimestamp == -1 || TimeUtils
+            .rtpDiff(acceptedStream.lastPktTimestamp, pktTimestamp) <= 0)
+        {
+            if (acceptedStream.lastPktTimestamp == -1 || TimeUtils
+                .rtpDiff(acceptedStream.lastPktTimestamp, pktTimestamp) < 0)
             {
                 // The current pkt signals the receit of a piece of a new (i.e.
                 // unobserved until now) frame.
@@ -373,10 +464,10 @@ public class SimulcastReceiver
                                                 - pkt.getHeaderLength()
                                                 - pkt.getPaddingSize())
                                         + " bytes, "
-                                        + (acceptedStream.isKeyFrame(pkt)
-                                            ? "key"
-                                            : "delta")
-                                        + " frame.");
+                                        + "isKeyFrame="
+                                        + (isKeyFrame == null ? "null"
+                                            : isKeyFrame)
+                                        + ".");
                         }
                     }
                 }
@@ -385,6 +476,16 @@ public class SimulcastReceiver
                 {
                     // It looks like at least one pkt was lost (or delayed). We
                     // cannot rely on lastPktMarker.
+                    if (logger.isDebugEnabled())
+                    {
+                        logger.debug("It looks like at least one pkt was lost " +
+                            "(or delayed). Last pkt sequence number=" +
+                            acceptedStream.lastPktSequenceNumber +
+                            ", expected sequence number="
+                            + expectedPktSequenceNumber +
+                            ", received sequence number="
+                            + pktSequenceNumber);
+                    }
                 }
                 else
                 {
@@ -404,7 +505,11 @@ public class SimulcastReceiver
             return;
         }
 
-        if (acceptedStream.getOrder() != 0 && !acceptedStream.isStreaming)
+        Set<SimulcastStream> changedStreams = new HashSet<>();
+
+        if (acceptedStream.getOrder()
+            != SimulcastStream.SIMULCAST_LAYER_ORDER_BASE
+            && !acceptedStream.isStreaming)
         {
             // If the frame-based approach to the detection of stream drops
             // works (i.e. there will always be at least 1 high quality frame
@@ -424,12 +529,11 @@ public class SimulcastReceiver
                     "order-" + acceptedStream.getOrder() + " stream (" +
                         acceptedStream.getPrimarySSRC()
                         + ") resumed on seqnum " + pkt.getSequenceNumber()
-                        + ", "
-                        + (acceptedStream.isKeyFrame(pkt) ? "key" : "delta")
-                        + " frame.");
+                        + ", " + "isKeyFrame="
+                        + (isKeyFrame == null ? "null" : isKeyFrame) + ".");
             }
 
-            fireSimulcastStreamsChangedAsync(acceptedStream);
+            changedStreams.add(acceptedStream);
         }
 
         // Determine whether any of {@link #simulcastStreams} other than
@@ -445,7 +549,7 @@ public class SimulcastReceiver
         int ix = 0;
 
         for (Iterator<SimulcastStream> it
-             = simulcastStreamFrameHistory.iterator();
+             = localSimulcastStreamFrameHistory.iterator();
              it.hasNext();
              ++ix)
         {
@@ -486,11 +590,17 @@ public class SimulcastReceiver
                     // already.
                     if (simStream.isStreaming())
                     {
-                        maybeTimeout(
+                        boolean needsTimeout = needsTimeout(
                                 acceptedStream,
                                 pkt,
                                 simStream,
+                                localSimulcastStreamFrameHistory,
                                 indexOfLastSourceOccurrenceInHistory);
+
+                        if (needsTimeout)
+                        {
+                            changedStreams.add(simStream);
+                        }
                     }
                 }
                 else if (simStream == acceptedStream)
@@ -501,11 +611,13 @@ public class SimulcastReceiver
         }
 
 
+        SimulcastStream[] changedStreamsArr = changedStreams.toArray(
+            new SimulcastStream[changedStreams.size()]);
+
+        fireSimulcastStreamsChangedAsync(changedStreamsArr);
         // As previously stated, the current method invocation signals the
         // receipt of 1 frame by source.
-        simulcastStreamFrameHistory.add(0, acceptedStream);
-        // TODO Prune simulcastStreamFrameHistory by forgetting so that it does
-        // not become too long.
+        localSimulcastStreamFrameHistory.add(0, acceptedStream);
     }
 
     /**
@@ -563,15 +675,23 @@ public class SimulcastReceiver
      * possibly influenced the decision to trigger a check on {@code effect}
      * @param effect the {@code SimulcastStream} which is to be checked whether
      * it looks like it has been paused/stopped by the remote peer
-     * @param endIndexInSimulcastStreamFrameHistory
+     * @param endIndexInSimulcastStreamFrameHistory Determines how far back in
+     * the {@localSimulcastStreamFrameHistory} we should look for the
+     * {@code effect}.
+     * @param localSimulcastStreamFrameHistory The history of the order/sequence
+     * of receipt of (video) frames by {@link #simulcastStreams}. Used in an
+     * attempt to speed up the detection of paused/stopped
+     * {@code SimulcastStream}s by counting (video) frames.
      */
-    private void maybeTimeout(
+    private boolean needsTimeout(
             SimulcastStream cause,
             RawPacket pkt,
             SimulcastStream effect,
+            List<SimulcastStream> localSimulcastStreamFrameHistory,
             int endIndexInSimulcastStreamFrameHistory)
     {
-        Iterator<SimulcastStream> it = simulcastStreamFrameHistory.iterator();
+        Iterator<SimulcastStream> it
+            = localSimulcastStreamFrameHistory.iterator();
         boolean timeout = true;
 
         for (int ix = 0;
@@ -619,10 +739,11 @@ public class SimulcastReceiver
                 // selected endpoint at a given receiving endpoint changes, for
                 // example.
 
-                // TODO merge with other fire event
-                fireSimulcastStreamsChangedAsync(effect);
+                return true;
             }
         }
+
+        return false;
     }
 
     /**
@@ -707,5 +828,17 @@ public class SimulcastReceiver
                 }
             }
         }
+    }
+
+    /**
+     * Checks whether {@code pkt} is the first RTP packet of a VP8 keyframe.
+     * @param pkt the packet to check.
+     * @return true if {@code pkt} is the first RTP packet of a VP8 keyframe.
+     */
+    boolean isKeyFrame(RawPacket pkt)
+    {
+        byte redPT = getSimulcastEngine().getVideoChannel().getRedPayloadType();
+        byte vp8PT = getSimulcastEngine().getVideoChannel().getVP8PayloadType();
+        return Utils.isKeyFrame(pkt, redPT, vp8PT);
     }
 }
