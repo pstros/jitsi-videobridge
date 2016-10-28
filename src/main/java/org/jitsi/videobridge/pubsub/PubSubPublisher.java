@@ -16,6 +16,7 @@
 package org.jitsi.videobridge.pubsub;
 
 import java.util.*;
+import java.util.concurrent.*;
 
 import net.java.sip.communicator.util.*;
 
@@ -40,7 +41,7 @@ public class PubSubPublisher
      * <tt>PubSubPublisher</tt> instance responsible for it.
      */
     private static final Map<String, PubSubPublisher> instances
-        = new HashMap<>();
+        = new ConcurrentHashMap<>();
 
     /**
      * The <tt>Logger</tt> used by the <tt>PubSubPublisher</tt> class and its
@@ -52,7 +53,7 @@ public class PubSubPublisher
     /**
      * The default timeout of the packets in milliseconds.
      */
-    private static final int PACKET_TIMEOUT = 500;
+    private static final int PACKET_TIMEOUT = 5000;
 
     /**
      * Gets a <tt>PubSubPublisher</tt> instance for a specific service (name).
@@ -132,17 +133,20 @@ public class PubSubPublisher
     /**
      * Map with the requests for configuring a node.
      */
-    private Map<String, String> pendingConfigureRequests = new HashMap<>();
+    private Map<String, String> pendingConfigureRequests
+        = new ConcurrentHashMap<>();
 
     /**
      * Map with the requests for node creation.
      */
-    private Map<String, String> pendingCreateRequests = new HashMap<>();
+    private Map<String, String> pendingCreateRequests
+        = new ConcurrentHashMap<>();
 
     /**
      * Map with the publish requests.
      */
-    private Map<String, String> pendingPublishRequests = new HashMap<>();
+    private Map<String, String> pendingPublishRequests
+        = new ConcurrentHashMap<>();
 
     /**
      * The name of the PubSub service.
@@ -223,8 +227,9 @@ public class PubSubPublisher
                         if(nodeName != null)
                         {
                             logger.error(
-                                    "Configuration of the node failed: "
-                                        + nodeName);
+                                    "Timed out a configuration request "
+                                        + "(packetID=: " + packetID
+                                        + " nodeName=" + nodeName + ")");
                             fireResponseCreateEvent(
                                     PubSubResponseListener.Response.SUCCESS);
                         }
@@ -254,18 +259,27 @@ public class PubSubPublisher
                 new NodeExtension(PubSubElementType.CREATE, nodeName));
 
         pendingCreateRequests.put(packetID, nodeName);
+
+        // Send the request before starting the timer, as we have observed
+        // sending to be significantly delayed (possibly waiting for the XMPP
+        // component connection to become ready).
+        send(request);
+
         timeoutTimer.schedule(
                 new TimerTask()
                 {
                     @Override
                     public void run()
                     {
-                        pendingCreateRequests.remove(packetID);
+                        String nodeName = pendingCreateRequests.remove(packetID);
+                        if (nodeName != null)
+                        {
+                            logger.warn("Timed out a create request with ID "
+                                            + packetID);
+                        }
                     }
                 },
                 PACKET_TIMEOUT);
-
-        send(request);
     }
 
     /**
@@ -371,6 +385,8 @@ public class PubSubPublisher
                 }
 
                 String nodeName = pendingCreateRequests.remove(packetID);
+                logger.info("PubSub node already exists (packetID=" + packetID
+                        + " nodeName=" + nodeName +")");
 
                 if (nodeName != null)
                 {
@@ -478,7 +494,7 @@ public class PubSubPublisher
                         if(nodeName != null)
                         {
                             logger.error(
-                                    "Publish request timeout: " + nodeName);
+                                    "Times out a publish request: " + nodeName);
                         }
                     }
                 },

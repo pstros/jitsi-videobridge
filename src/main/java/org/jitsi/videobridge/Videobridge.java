@@ -62,7 +62,7 @@ public class Videobridge
      * options passed as the second argument to
      * {@link #handleColibriConferenceIQ(ColibriConferenceIQ, int)}.
      */
-    private static final String DEFAULT_OPTIONS_PROPERTY_NAME
+    public static final String DEFAULT_OPTIONS_PROPERTY_NAME
         = "org.jitsi.videobridge.defaultOptions";
 
     /**
@@ -75,7 +75,7 @@ public class Videobridge
     * The name of the property which specifies the path to the directory in
     * which media recordings will be stored.
     */
-    static final String ENABLE_MEDIA_RECORDING_PNAME
+    public static final String ENABLE_MEDIA_RECORDING_PNAME
         = "org.jitsi.videobridge.ENABLE_MEDIA_RECORDING";
 
     /**
@@ -88,14 +88,14 @@ public class Videobridge
      * The name of the property which controls whether media recording is
      * enabled.
      */
-    static final String MEDIA_RECORDING_PATH_PNAME
+    public static final String MEDIA_RECORDING_PATH_PNAME
         = "org.jitsi.videobridge.MEDIA_RECORDING_PATH";
 
     /**
      * The name of the property which specifies the token used to authenticate
      * requests to enable media recording.
      */
-    static final String MEDIA_RECORDING_TOKEN_PNAME
+    public static final String MEDIA_RECORDING_TOKEN_PNAME
         = "org.jitsi.videobridge.MEDIA_RECORDING_TOKEN";
 
     /**
@@ -138,7 +138,7 @@ public class Videobridge
      * shutdown mode. For XMPP API this is "from" JID. In case of REST
      * the source IP is being copied into the "from" field of the IQ.
      */
-    static final String SHUTDOWN_ALLOWED_SOURCE_REGEXP_PNAME
+    public static final String SHUTDOWN_ALLOWED_SOURCE_REGEXP_PNAME
         = "org.jitsi.videobridge.shutdown.ALLOWED_SOURCE_REGEXP";
 
     /**
@@ -146,7 +146,7 @@ public class Videobridge
      * For XMPP API this is "from" JID. In case of REST the source IP is being
      * copied into the "from" field of the IQ.
      */
-    static final String AUTHORIZED_SOURCE_REGEXP_PNAME
+    public static final String AUTHORIZED_SOURCE_REGEXP_PNAME
         = "org.jitsi.videobridge.AUTHORIZED_SOURCE_REGEXP";
 
     /**
@@ -900,7 +900,13 @@ public class Videobridge
                 Boolean initiator = channelIQ.isInitiator();
 
                 if (initiator != null)
+                {
                     channel.setInitiator(initiator);
+                }
+                else
+                {
+                    initiator = true;
+                }
 
                 channel.setPayloadTypes(channelIQ.getPayloadTypes());
                 channel.setRtpHeaderExtensions(
@@ -908,9 +914,8 @@ public class Videobridge
 
                 channel.setDirection(channelIQ.getDirection());
 
-                channel.setSources(channelIQ.getSources());
-
-                channel.setSourceGroups(channelIQ.getSourceGroups());
+                channel.setMediaStreamTracks(
+                    channelIQ.getSources(), channelIQ.getSourceGroups());
 
                 if (channel instanceof VideoChannel)
                 {
@@ -925,7 +930,10 @@ public class Videobridge
                 if (channelBundleId != null)
                 {
                     TransportManager transportManager
-                        = conference.getTransportManager(channelBundleId, true);
+                        = conference.getTransportManager(
+                            channelBundleId,
+                            true,
+                            initiator);
 
                     transportManager.addChannel(channel);
                 }
@@ -1059,7 +1067,13 @@ public class Videobridge
                 Boolean initiator = sctpConnIq.isInitiator();
 
                 if (initiator != null)
+                {
                     sctpConn.setInitiator(initiator);
+                }
+                else
+                {
+                    initiator = true;
+                }
 
                 // transport
                 sctpConn.setTransport(sctpConnIq.getTransport());
@@ -1069,7 +1083,8 @@ public class Videobridge
                     TransportManager transportManager
                         = conference.getTransportManager(
                                 channelBundleId,
-                                true);
+                                true,
+                                initiator);
 
                     transportManager.addChannel(sctpConn);
                 }

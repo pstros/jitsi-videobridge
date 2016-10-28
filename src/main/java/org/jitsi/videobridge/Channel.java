@@ -65,6 +65,11 @@ public abstract class Channel
     private final String channelBundleId;
 
     /**
+     * Remembers when this <tt>Channel</tt> instance was created.
+     */
+    private final long creationTimestamp = System.currentTimeMillis();
+
+    /**
      * The name of the <tt>Channel</tt> property <tt>endpoint</tt> which
      * points to the <tt>Endpoint</tt> of the conference participant associated
      * with this <tt>Channel</tt>..
@@ -463,6 +468,18 @@ public abstract class Channel
     }
 
     /**
+     * Gets the time in milliseconds which tells when this <tt>Channel</tt> was
+     * created.
+     *
+     * @return the time in milliseconds which indicates when this
+     * <tt>Channel</tt> instance was created.
+     */
+    public long getCreationTimestamp()
+    {
+        return creationTimestamp;
+    }
+
+    /**
      * Child classes should implement this method and return
      * <tt>DtlsControl</tt> instance if they are willing to use DTLS transport.
      * Otherwise, <tt>null</tt> should be returned.
@@ -604,7 +621,7 @@ public abstract class Channel
             {
                 transportManager
                     = getContent().getConference()
-                        .getTransportManager(channelBundleId, true);
+                        .getTransportManager(channelBundleId, true, isInitiator());
             }
 
             if (transportManager == null)

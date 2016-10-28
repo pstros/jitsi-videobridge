@@ -16,7 +16,6 @@
 package org.jitsi.videobridge.simulcast;
 
 import org.jitsi.impl.neomedia.*;
-import org.jitsi.impl.neomedia.codec.video.vp8.*;
 
 /**
  * The <tt>SimulcastStream</tt> of a <tt>SimulcastReceiver</tt> represents a
@@ -208,16 +207,6 @@ public class SimulcastStream
         // 2. if stream N is streaming, then stream N-1 is streaming. N == order
         // in this class TAG(simulcast-assumption,arbitrary-sim-simStreams).
         return isStreaming || order == 0;
-    }
-
-    /**
-     * Checks whether {@code pkt} is the first RTP packet of a VP8 keyframe.
-     * @param pkt the packet to check.
-     * @return true if {@code pkt} is the first RTP packet of a VP8 keyframe.
-     */
-    public boolean isKeyFrame(RawPacket pkt)
-    {
-        return simulcastReceiver.isKeyFrame(pkt);
     }
 
     /**

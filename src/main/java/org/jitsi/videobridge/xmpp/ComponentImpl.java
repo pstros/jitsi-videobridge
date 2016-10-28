@@ -38,7 +38,7 @@ import org.xmpp.packet.Packet;
 
 /**
  * Implements <tt>org.xmpp.component.Component</tt> to provide Jitsi Videobridge
- * as an internal Jabber component.
+ * as a Jabber component.
  *
  * @author Lyubomir Marinov
  */
@@ -202,7 +202,13 @@ public class ComponentImpl
         return NAME;
     }
 
-    private Videobridge getVideobridge()
+    /**
+     * Returns the {@link Videobridge} instance that is managing conferences
+     * for this component. Returns <tt>null</tt> if no instance is running.
+     *
+     * @return the videobridge instance, <tt>null</tt> when none is running.
+     */
+    public Videobridge getVideobridge()
     {
         BundleContext bundleContext = getBundleContext();
         Videobridge videobridge;
