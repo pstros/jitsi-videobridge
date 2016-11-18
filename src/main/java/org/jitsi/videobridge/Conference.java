@@ -233,6 +233,7 @@ public class Conference
      * should be considered when generating statistics.
      */
     public Conference(Videobridge videobridge,
+                      ConferenceSpeechActivity speechActivity,
                       String id,
                       String focus,
                       String name,
@@ -244,6 +245,7 @@ public class Conference
             throw new NullPointerException("id");
 
         this.videobridge = videobridge;
+        this.speechActivity = speechActivity;
         this.id = id;
         this.focus = focus;
         this.eventAdmin = enableLogging ? videobridge.getEventAdmin() : null;
@@ -257,8 +259,8 @@ public class Conference
 
         lastKnownFocus = focus;
 
-        speechActivity = new ConferenceSpeechActivity(this);
         speechActivity.addPropertyChangeListener(propertyChangeListener);
+        addPropertyChangeListener(speechActivity.propertyChangeListener);
 
         if (enableLogging)
         {
@@ -692,6 +694,8 @@ public class Conference
                         throw (ThreadDeath) t;
                 }
             }
+
+            speechActivity.expire();
 
             // Close the transportManagers of this Conference. Normally, there
             // will be no TransportManager left to close at this point because
