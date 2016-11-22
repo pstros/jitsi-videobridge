@@ -1729,6 +1729,7 @@ public class Conference
             // likely want to notify the Endpoints participating in this
             // Conference.
             dominantSpeakerChanged();
+            speechActivityEndpointsChanged();
         }
         else if (ConferenceSpeechActivity.ENDPOINTS_PROPERTY_NAME.equals(
                 propertyName))
