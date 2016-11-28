@@ -17,7 +17,6 @@ package org.jitsi.videobridge;
 
 import java.beans.*;
 import java.io.*;
-import java.lang.ref.*;
 import java.lang.reflect.*;
 import java.text.*;
 import java.util.*;
@@ -28,6 +27,7 @@ import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
 import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.ColibriConferenceIQ.Recording.*;
 import net.java.sip.communicator.util.*;
 
+import com.google.common.annotations.*;
 import org.jitsi.eventadmin.*;
 import org.jitsi.service.configuration.*;
 import org.jitsi.service.libjitsi.*;
@@ -425,7 +425,7 @@ public class Conference
      * in order to notify an <tt>Endpoint</tt> that the dominant speaker in this
      * multipoint conference has changed to <tt>dominantSpeaker</tt>
      */
-    private String createDominantSpeakerEndpointChangeEvent(
+    private static String createDominantSpeakerEndpointChangeEvent(
             Endpoint dominantSpeaker)
     {
         return
@@ -1128,11 +1128,13 @@ public class Conference
             }
 
             content = new Content(this, name);
+
             if (isRecording())
             {
                 content.setRecording(true, getRecordingPath());
             }
-            contents.add(content);
+
+            addContent(content);
         }
 
         if (logger.isInfoEnabled())
@@ -1150,6 +1152,29 @@ public class Conference
         }
 
         return content;
+    }
+
+    /**
+     * For testing only - adds a content to the list of <tt>Content</tt>s for
+     * this <tt>Conference</tt>
+     *
+     * @param content
+     */
+    @VisibleForTesting
+    void addContent(Content content) {
+        contents.add(content);
+    }
+
+    /**
+     * For testing only - sets the <tt>List</tt> of <tt>Endpoint</tt>s for this
+     * <tt>Conference</tt>
+     *
+     * @param endpoints
+     */
+    @VisibleForTesting
+    void setEndpoints(List<Endpoint> endpoints) {
+        this.endpoints.clear();
+        this.endpoints.addAll(endpoints);
     }
 
     /**

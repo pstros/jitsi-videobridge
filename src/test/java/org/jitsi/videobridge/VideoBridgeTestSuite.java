@@ -26,6 +26,7 @@ import org.junit.runners.*;
 @RunWith(Suite.class)
 @Suite.SuiteClasses(
     {
+        ConferenceTest.class,
         FocusControlTest.class,
         RawUdpConferenceTest.class,
         BridgeShutdownTest.class // This one must be the last one
