@@ -25,32 +25,50 @@ import org.junit.*;
 import static org.easymock.EasyMock.*;
 import static org.junit.Assert.*;
 
-public class ConferenceTest extends EasyMockSupport {
+/**
+ * Tests the Conference class at the unit level
+ */
+public class ConferenceTest
+    extends EasyMockSupport
+{
     private Conference conference;
+
     private Videobridge videobridgeMock;
+
     private ConferenceSpeechActivity speechActivityMock;
+
     private Content contentMock;
+
     private RtpChannel channelMock;
+
     private Endpoint endpointMock;
+
     private List<Endpoint> endpoints;
 
     @Before
-    public void setUp() {
+    public void setUp()
+    {
         videobridgeMock = mock(Videobridge.class);
         speechActivityMock = niceMock(ConferenceSpeechActivity.class);
         contentMock = mock(Content.class);
         channelMock = mock(RtpChannel.class);
         endpointMock = mock(Endpoint.class);
 
-        endpoints = new ArrayList<>();
-        endpoints.add(endpointMock);
+        endpoints = new ArrayList<>(Arrays.asList(endpointMock));
 
-        conference = new Conference(videobridgeMock, speechActivityMock,
-            "fakeId", "focus", "name", false);
+        conference =
+            new Conference(videobridgeMock, speechActivityMock, "fakeId",
+                "focus", "name", false);
 
         resetAll();
     }
 
+    /**
+     * Tests the <tt>propertyChange</tt> method of <tt>Conference</tt> when an
+     * event signaling that the dominant speaker has changed is received.
+     *
+     * @throws Exception
+     */
     @Test
     public void propertyChange_dominantSpeakerChange_broadcastUpdate()
         throws Exception
@@ -62,7 +80,7 @@ public class ConferenceTest extends EasyMockSupport {
 
         replayAll();
 
-        conference.addContent(contentMock);
+        conference.setContents(new ArrayList<>(Arrays.asList(contentMock)));
         conference.propertyChange(new PropertyChangeEvent(speechActivityMock,
             ConferenceSpeechActivity.DOMINANT_ENDPOINT_PROPERTY_NAME, null,
             null));
@@ -73,16 +91,21 @@ public class ConferenceTest extends EasyMockSupport {
             .contains("DominantSpeakerEndpointChangeEvent"));
     }
 
+    /**
+     * Tests the <tt>propertyChange</tt> method of <tt>Conference</tt> when an
+     * event signaling that the participating endpoints have changed is
+     * received.
+     */
     @Test
-    public void propertyChange_endpointsChanged_broadcastUpdate() {
+    public void propertyChange_endpointsChanged_broadcastUpdate()
+    {
         expectSpeechActivityEndpointsChanged();
 
         replayAll();
 
-        conference.addContent(contentMock);
+        conference.setContents(new ArrayList<>(Arrays.asList(contentMock)));
         conference.propertyChange(new PropertyChangeEvent(speechActivityMock,
-            ConferenceSpeechActivity.ENDPOINTS_PROPERTY_NAME, null,
-            null));
+            ConferenceSpeechActivity.ENDPOINTS_PROPERTY_NAME, null, null));
 
         verifyAll();
     }
@@ -100,11 +123,9 @@ public class ConferenceTest extends EasyMockSupport {
     }
 
     @SuppressWarnings("unchecked")
-    private void expectSpeechActivityEndpointsChanged() {
-        List<Endpoint> endpoints = new ArrayList<>(Arrays.asList(endpointMock));
-
-        expect(speechActivityMock.getEndpoints())
-            .andReturn(endpoints);
+    private void expectSpeechActivityEndpointsChanged()
+    {
+        expect(speechActivityMock.getEndpoints()).andReturn(endpoints);
         expect(contentMock.getMediaType()).andReturn(MediaType.VIDEO);
         expect(contentMock.getChannels())
             .andReturn(new Channel[] { channelMock });

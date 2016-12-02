@@ -310,7 +310,7 @@ public class ConferenceSpeechActivity
     }
 
     /**
-     * Returns a <tt>Endpoint</tt>, which has <tt>ssrc</tt> in its channel's
+     * Returns an <tt>Endpoint</tt>, which has <tt>ssrc</tt> in its channel's
      * list of received SSRCs, or <tt>null</tt> in case no such
      * <tt>Endpoint</tt> exists.
      *
@@ -319,7 +319,8 @@ public class ConferenceSpeechActivity
      * list of received SSRCs, or <tt>null</tt> in case no such
      * <tt>Endpoint</tt> exists.
      */
-    private Endpoint getEndpointByReceiveSSRC(long ssrc) {
+    private Endpoint getEndpointByReceiveSSRC(long ssrc)
+    {
         for (Endpoint endpoint : endpoints)
         {
             for (Channel channel : endpoint.getChannels(MediaType.AUDIO))
@@ -820,7 +821,8 @@ public class ConferenceSpeechActivity
      * @return <tt>true</tt> if there were any changes to the sorted list of
      * <tt>Endpoint</tt>s
      */
-    private boolean updateEndpoints() {
+    private boolean updateEndpoints()
+    {
         boolean updated = false;
 
         if (endpoints == null)

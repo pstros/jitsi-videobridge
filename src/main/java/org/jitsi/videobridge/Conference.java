@@ -1134,7 +1134,7 @@ public class Conference
                 content.setRecording(true, getRecordingPath());
             }
 
-            addContent(content);
+            contents.add(content);
         }
 
         if (logger.isInfoEnabled())
@@ -1155,24 +1155,28 @@ public class Conference
     }
 
     /**
-     * For testing only - adds a content to the list of <tt>Content</tt>s for
-     * this <tt>Conference</tt>
+     * For testing only - sets the <tt>List</tt> of <tt>Content</tt>s for this
+     * <tt>Conference</tt>
      *
-     * @param content
+     * @param contents the <tt>List</tt> of <tt>Content</tt>s to set for testing
      */
     @VisibleForTesting
-    void addContent(Content content) {
-        contents.add(content);
+    void setContents(List<Content> contents)
+    {
+        this.contents.clear();
+        this.contents.addAll(contents);
     }
 
     /**
      * For testing only - sets the <tt>List</tt> of <tt>Endpoint</tt>s for this
      * <tt>Conference</tt>
      *
-     * @param endpoints
+     * @param endpoints this <tt>List</tt> of <tt>Endpoint</tt>s to set for
+     * testing
      */
     @VisibleForTesting
-    void setEndpoints(List<Endpoint> endpoints) {
+    void setEndpoints(List<Endpoint> endpoints)
+    {
         this.endpoints.clear();
         this.endpoints.addAll(endpoints);
     }
