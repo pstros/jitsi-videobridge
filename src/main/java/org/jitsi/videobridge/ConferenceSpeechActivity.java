@@ -708,6 +708,7 @@ public class ConferenceSpeechActivity
      * interest, the name of the property and the old and new values of that
      * property
      */
+    @SuppressWarnings("unchecked")
     @Override
     public void propertyChange(PropertyChangeEvent ev)
     {
@@ -719,22 +720,16 @@ public class ConferenceSpeechActivity
 
         if (Conference.ENDPOINTS_PROPERTY_NAME.equals(propertyName))
         {
-            synchronized (syncRoot)
-            {
-                endpointsChanged = true;
-                maybeStartEventDispatcher();
-            }
-        }
-        else if (DominantSpeakerIdentification.DOMINANT_SPEAKER_PROPERTY_NAME
-                .equals(propertyName))
-        {
-            DominantSpeakerIdentification dominantSpeakerIdentification
-                = this.dominantSpeakerIdentification;
+            Object newValue = ev.getNewValue();
 
-            if ((dominantSpeakerIdentification != null)
-                    && dominantSpeakerIdentification.equals(ev.getSource()))
+            if (newValue instanceof List)
             {
-                // TODO Auto-generated method stub
+                synchronized (syncRoot)
+                {
+                    endpointsChanged = true;
+                    conferenceEndpoints = (List<Endpoint>) newValue;
+                    maybeStartEventDispatcher();
+                }
             }
         }
     }

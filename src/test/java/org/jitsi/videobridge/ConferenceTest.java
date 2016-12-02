@@ -116,7 +116,6 @@ public class ConferenceTest
         expect(speechActivityMock.getDominantEndpoint())
             .andReturn(endpointMock);
 
-        expect(endpointMock.isExpired()).andReturn(false);
         endpointMock.sendMessageOnDataChannel(capture(messageArgument));
 
         conference.setEndpoints(new LinkedList<>(Arrays.asList(endpointMock)));

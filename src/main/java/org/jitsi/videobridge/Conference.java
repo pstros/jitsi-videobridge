@@ -956,7 +956,7 @@ public class Conference
         }
 
         if (changed)
-            firePropertyChange(ENDPOINTS_PROPERTY_NAME, null, null);
+            fireEndpointsChangedEvent();
 
         return endpoint;
     }
@@ -1005,31 +1005,6 @@ public class Conference
      */
     public List<Endpoint> getEndpoints()
     {
-        List<Endpoint> endpoints;
-        boolean changed = false;
-
-        synchronized (this.endpoints)
-        {
-            endpoints = new ArrayList<>(this.endpoints.size());
-            for (Iterator<Endpoint> i = this.endpoints.iterator(); i.hasNext();)
-            {
-                Endpoint endpoint = i.next();
-
-                if (endpoint.isExpired())
-                {
-                    i.remove();
-                    changed = true;
-                }
-                else
-                {
-                    endpoints.add(endpoint);
-                }
-            }
-        }
-
-        if (changed)
-            firePropertyChange(ENDPOINTS_PROPERTY_NAME, null, null);
-
         return endpoints;
     }
 
@@ -1484,7 +1459,7 @@ public class Conference
         }
 
         if (removed)
-            firePropertyChange(ENDPOINTS_PROPERTY_NAME, null, null);
+            fireEndpointsChangedEvent();
 
         return removed;
     }
@@ -1769,6 +1744,17 @@ public class Conference
         {
             speechActivityEndpointsChanged();
         }
+    }
+
+    /**
+     * Fires a property change for the endpoints property and includes the
+     * the current <tt>List</tt> of <tt>Endpoint</tt>s wrapped in an
+     * unmodifiable <tt>List</tt> on the event as the new value.
+     */
+    private void fireEndpointsChangedEvent()
+    {
+        firePropertyChange(ENDPOINTS_PROPERTY_NAME, null,
+                Collections.unmodifiableList(endpoints));
     }
 
     /**
