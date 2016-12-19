@@ -437,10 +437,16 @@ public class VideoChannel
 
         if (endpoint.equals(getEndpoint()))
         {
+            final List<String> forwardedEndpoints =
+                    bitrateController.getForwardedEndpoints();
             sendLastNEndpointsChangeEvent(
-                bitrateController.getForwardedEndpoints(),
-                null,
-                null);
+                    forwardedEndpoints,
+                    null,
+                    null);
+            if (getLastN() >= 0)
+            {
+                getContent().askForKeyframesById(forwardedEndpoints);
+            }
         }
     }
 
