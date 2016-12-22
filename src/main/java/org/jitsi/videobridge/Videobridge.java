@@ -272,6 +272,7 @@ public class Videobridge
                     conference
                         = new Conference(
                                 this,
+                                new ConferenceSpeechActivity(),
                                 id,
                                 focus,
                                 name,

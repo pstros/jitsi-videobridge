@@ -119,23 +119,20 @@ public class ConferenceSpeechActivity
      * read and into which the <tt>Endpoint</tt> ID is to be written
      * @param ssrcKey the key in <tt>jsonObject</tt> with which the SSRC to be
      * resolved is associated
-     * @param conference
      * @param endpointKey the key in <tt>jsonObject</tt> with which the resolved
      * <tt>Endpoint</tt> ID is to be associated
      */
     @SuppressWarnings("unchecked")
-    private static void resolveSSRCAsEndpoint(
+    private void resolveSSRCAsEndpoint(
             JSONObject jsonObject,
             String ssrcKey,
-            Conference conference,
             String endpointKey)
     {
         long ssrc = parseSSRC(jsonObject.get(ssrcKey));
 
         if (ssrc != -1)
         {
-            Endpoint endpoint
-                = conference.findEndpointByReceiveSSRC(ssrc, MediaType.AUDIO);
+            Endpoint endpoint = getEndpointByReceiveSSRC(ssrc);
 
             if (endpoint != null)
             {
@@ -162,7 +159,7 @@ public class ConferenceSpeechActivity
 
     /**
      * The <tt>ActiveSpeakerDetector</tt> which detects/identifies the
-     * active/dominant speaker in {@link #conference}. 
+     * active/dominant speaker in {@link Conference}.
      */
     private ActiveSpeakerDetector activeSpeakerDetector;
 
@@ -173,17 +170,8 @@ public class ConferenceSpeechActivity
     private final Object activeSpeakerDetectorSyncRoot = new Object();
 
     /**
-     * The <tt>Conference</tt> for which this instance represents the speech
-     * activity of its <tt>Endpoint</tt>s. The reference will be set to
-     * <tt>null</tt> once the <tt>Conference</tt> gets expired.
-     * <tt>ConferenceSpeechActivity</tt> is a part of <tt>Conference</tt> and
-     * the operation of the former in the absence of the latter is useless.
-     */
-    private Conference conference;
-
-    /**
      * The <tt>Endpoint</tt> which is the dominant speaker in
-     * {@link #conference}.
+     * {@link Conference}.
      */
     private Endpoint dominantEndpoint;
 
@@ -202,14 +190,21 @@ public class ConferenceSpeechActivity
 
     /**
      * The ordered list of <tt>Endpoint</tt>s participating in
-     * {@link #conference} with the dominant (speaker) <tt>Endpoint</tt> at the
+     * {@link Conference} with the dominant (speaker) <tt>Endpoint</tt> at the
      * beginning of the list i.e. the dominant speaker history.
      */
     private List<Endpoint> endpoints;
 
     /**
+     * The unordered list of <tt>Endpoint</tt>s participating in
+     * {@link Conference}.
+     */
+    @SuppressWarnings("unchecked")
+    private List<Endpoint> conferenceEndpoints = Collections.EMPTY_LIST;
+
+    /**
      * The indicator which signals to {@link #eventDispatcher} that the
-     * <tt>endpoints</tt> set of {@link #conference} was changed and
+     * <tt>endpoints</tt> set of {@link Conference} was changed and
      * <tt>eventDispatcher</tt> may have to fire an event.
      */
     private boolean endpointsChanged = false;
@@ -231,13 +226,13 @@ public class ConferenceSpeechActivity
     /**
      * The <tt>PropertyChangeListener</tt> implementation employed by this
      * instance to listen to changes in the values of properties of interest to
-     * this instance. For example, listens to {@link #conference} in order to
+     * this instance. For example, listens to {@link Conference} in order to
      * notify about changes in the list of <tt>Endpoint</tt>s participating in
      * the multipoint conference. The implementation keeps a
      * <tt>WeakReference</tt> to this instance and automatically removes itself
      * from <tt>PropertyChangeNotifier</tt>s. 
      */
-    private final PropertyChangeListener propertyChangeListener
+    final PropertyChangeListener propertyChangeListener
         = new WeakReferencePropertyChangeListener(this);
 
     /**
@@ -247,23 +242,18 @@ public class ConferenceSpeechActivity
     private final Object syncRoot = new Object();
 
     /**
+     * The indicator for whether or not the <tt>Conference</tt> associated with
+     * this <tt>ConferenceSpeechActivity</tt> has expired and activity no longer
+     * needs to be monitored.
+     */
+    private boolean expired = false;
+
+    /**
      * Initializes a new <tt>ConferenceSpeechActivity</tt> instance which is to
      * represent the speech activity in a specific <tt>Conference</tt>.
-     *
-     * @param conference the <tt>Conference</tt> whose speech activity is to be
-     * represented by the new instance
      */
-    public ConferenceSpeechActivity(Conference conference)
+    public ConferenceSpeechActivity()
     {
-        Objects.requireNonNull(conference, "conference");
-
-        this.conference = conference;
-
-        /*
-         * The PropertyChangeListener will weakly reference this instance and
-         * will unregister itself from the conference sooner or later.
-         */
-        conference.addPropertyChangeListener(propertyChangeListener);
     }
 
     /**
@@ -276,20 +266,18 @@ public class ConferenceSpeechActivity
      */
     private void activeSpeakerChanged(long ssrc)
     {
-        Conference conference = getConference();
-
-        if (conference != null)
+        if (!expired)
         {
+            final Endpoint endpoint = getEndpointByReceiveSSRC(ssrc);
+
             if (logger.isTraceEnabled())
             {
                 logger.trace(
                         "The dominant speaker in conference "
-                            + conference.getID() + " is now the SSRC " + ssrc
-                            + ".");
+                            + endpoint.getConference().getID()
+                            + " is now the SSRC " + ssrc + ".");
             }
 
-            Endpoint endpoint
-                = conference.findEndpointByReceiveSSRC(ssrc, MediaType.AUDIO);
             boolean maybeStartEventDispatcher = false;
 
             synchronized (syncRoot)
@@ -322,6 +310,74 @@ public class ConferenceSpeechActivity
     }
 
     /**
+     * Returns an <tt>Endpoint</tt>, which has <tt>ssrc</tt> in its channel's
+     * list of received SSRCs, or <tt>null</tt> in case no such
+     * <tt>Endpoint</tt> exists.
+     *
+     * @param ssrc the SSRC to search for.
+     * @return an <tt>Endpoint</tt>, which has <tt>ssrc</tt> in its channel's
+     * list of received SSRCs, or <tt>null</tt> in case no such
+     * <tt>Endpoint</tt> exists.
+     */
+    private Endpoint getEndpointByReceiveSSRC(long ssrc)
+    {
+        for (Endpoint endpoint : endpoints)
+        {
+            for (Channel channel : endpoint.getChannels(MediaType.AUDIO))
+            {
+                if (channel instanceof RtpChannel)
+                {
+                    RtpChannel rtpChannel = (RtpChannel) channel;
+                    if (rtpChannel.getStream().getRemoteSourceIDs()
+                        .contains(ssrc))
+                    {
+                        return endpoint;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Indicates that the <tt>Conference</tt> has expired so there is no need to
+     * listen for active speaker updates and clean up can take place.
+     */
+    public void expire() {
+        synchronized (syncRoot)
+        {
+            this.expired = true;
+
+            initializeEndpoints();
+        }
+
+        /*
+         * The Conference has expired so there is no point to listen to
+         * ActiveSpeakerDetector. Remove the activeSpeakerChangedListener
+         * for the purposes of completeness, not because it is strictly
+         * necessary.
+         */
+        ActiveSpeakerDetector activeSpeakerDetector =
+            this.activeSpeakerDetector;
+
+        if (activeSpeakerDetector != null)
+        {
+            activeSpeakerDetector.removeActiveSpeakerChangedListener(
+                activeSpeakerChangedListener);
+        }
+
+        DominantSpeakerIdentification dominantSpeakerIdentification =
+            this.dominantSpeakerIdentification;
+
+        if (dominantSpeakerIdentification != null)
+        {
+            dominantSpeakerIdentification
+                .removePropertyChangeListener(propertyChangeListener);
+        }
+    }
+
+    /**
      * Retrieves a JSON representation of
      * {@link #dominantSpeakerIdentification} for the purposes of the REST API
      * of Videobridge.
@@ -345,9 +401,7 @@ public class ConferenceSpeechActivity
         }
         else
         {
-            Conference conference = getConference();
-
-            if (conference == null)
+            if (expired)
             {
                 jsonObject = null;
             }
@@ -362,7 +416,6 @@ public class ConferenceSpeechActivity
                     resolveSSRCAsEndpoint(
                             jsonObject,
                             "dominantSpeaker",
-                            conference,
                             "dominantEndpoint");
 
                     // Resolve the ssrc of each one of the speakers of
@@ -378,7 +431,6 @@ public class ConferenceSpeechActivity
                                 resolveSSRCAsEndpoint(
                                         speaker,
                                         "ssrc",
-                                        conference,
                                         "endpoint");
                             }
                         }
@@ -391,7 +443,6 @@ public class ConferenceSpeechActivity
                                     resolveSSRCAsEndpoint(
                                             (JSONObject) speaker,
                                             "ssrc",
-                                            conference,
                                             "endpoint");
                                 }
                             }
@@ -472,9 +523,7 @@ public class ConferenceSpeechActivity
          */
         if (addActiveSpeakerChangedListener)
         {
-            Conference conference = getConference();
-
-            if (conference != null)
+            if (!expired)
             {
                 activeSpeakerDetector.addActiveSpeakerChangedListener(
                         activeSpeakerChangedListener);
@@ -491,49 +540,6 @@ public class ConferenceSpeechActivity
         }
 
         return activeSpeakerDetector;
-    }
-
-    /**
-     * Gets the <tt>Conference</tt> whose speech activity is represented by this
-     * instance.
-     *
-     * @return the <tt>Conference</tt> whose speech activity is represented by
-     * this instance or <tt>null</tt> if the <tt>Conference</tt> has expired.
-     */
-    private Conference getConference()
-    {
-        Conference conference = this.conference;
-
-        if ((conference != null) && conference.isExpired())
-        {
-            this.conference = conference = null;
-
-            /*
-             * The Conference has expired so there is no point to listen to
-             * ActiveSpeakerDetector. Remove the activeSpeakerChangedListener
-             * for the purposes of completeness, not because it is strictly
-             * necessary.
-             */
-            ActiveSpeakerDetector activeSpeakerDetector
-                = this.activeSpeakerDetector;
-
-            if (activeSpeakerDetector != null)
-            {
-                activeSpeakerDetector.removeActiveSpeakerChangedListener(
-                        activeSpeakerChangedListener);
-            }
-
-            DominantSpeakerIdentification dominantSpeakerIdentification
-                = this.dominantSpeakerIdentification;
-
-            if (dominantSpeakerIdentification != null)
-            {
-                dominantSpeakerIdentification.removePropertyChangeListener(
-                        propertyChangeListener);
-            }
-        }
-
-        return conference;
     }
 
     /**
@@ -601,36 +607,29 @@ public class ConferenceSpeechActivity
              * instance initialization. The list of Endpoints of this instance
              * is initially populated with the Endpoints of the conference. 
              */
-            if (endpoints == null)
-            {
-                Conference conference = getConference();
-
-                if (conference == null)
-                {
-                    endpoints = new ArrayList<>();
-                }
-                else
-                {
-                    List<Endpoint> conferenceEndpoints
-                        = conference.getEndpoints();
-
-                    endpoints = new ArrayList<>(conferenceEndpoints.size());
-                    for (Endpoint endpoint : conferenceEndpoints)
-                        endpoints.add(endpoint);
-                }
-            }
+            initializeEndpoints();
 
             // The return value is the list of Endpoints of this instance.
-            ret = new ArrayList<>(endpoints.size());
-            for (Iterator<Endpoint> i = endpoints.iterator(); i.hasNext();)
-            {
-                Endpoint endpoint = i.next();
-
-                if (endpoint != null)
-                    ret.add(endpoint);
-            }
+            ret = Collections.unmodifiableList(endpoints);
         }
+
         return ret;
+    }
+
+    /**
+     * Initialize the list of <tt>Endpoint</tt>s by populating it with the
+     * <tt>Endpoints</tt> of the <tt>Conference</tt> or an empty list if the
+     * Conference has expired.
+     */
+    private void initializeEndpoints() {
+        if (expired)
+        {
+            endpoints = new ArrayList<>();
+        }
+        else
+        {
+            endpoints = new ArrayList<>(conferenceEndpoints);
+        }
     }
 
     /**
@@ -709,38 +708,28 @@ public class ConferenceSpeechActivity
      * interest, the name of the property and the old and new values of that
      * property
      */
+    @SuppressWarnings("unchecked")
     @Override
     public void propertyChange(PropertyChangeEvent ev)
     {
         // Cease to execute as soon as the Conference expires.
-        Conference conference = getConference();
-
-        if (conference == null)
+        if (expired)
             return;
 
         String propertyName = ev.getPropertyName();
 
         if (Conference.ENDPOINTS_PROPERTY_NAME.equals(propertyName))
         {
-            if (conference.equals(ev.getSource()))
+            Object newValue = ev.getNewValue();
+
+            if (newValue instanceof List)
             {
                 synchronized (syncRoot)
                 {
                     endpointsChanged = true;
+                    conferenceEndpoints = (List<Endpoint>) newValue;
                     maybeStartEventDispatcher();
                 }
-            }
-        }
-        else if (DominantSpeakerIdentification.DOMINANT_SPEAKER_PROPERTY_NAME
-                .equals(propertyName))
-        {
-            DominantSpeakerIdentification dominantSpeakerIdentification
-                = this.dominantSpeakerIdentification;
-
-            if ((dominantSpeakerIdentification != null)
-                    && dominantSpeakerIdentification.equals(ev.getSource()))
-            {
-                // TODO Auto-generated method stub
             }
         }
     }
@@ -758,8 +747,8 @@ public class ConferenceSpeechActivity
      */
     private boolean runInEventDispatcher(EventDispatcher eventDispatcher)
     {
-        boolean endpointsChanged = false;
-        boolean dominantEndpointChanged = false;
+        boolean shouldFireEndpointsChangedEvent;
+        boolean shouldFireDominantEndpointChangedEvent = false;
 
         synchronized (syncRoot)
         {
@@ -774,9 +763,7 @@ public class ConferenceSpeechActivity
              * As soon as the Conference associated with this instance expires,
              * kill all background threads.
              */
-            Conference conference = getConference();
-
-            if (conference == null)
+            if (expired)
                 return false;
 
             long now = System.currentTimeMillis();
@@ -800,72 +787,7 @@ public class ConferenceSpeechActivity
             }
             eventDispatcherTime = now;
 
-            /*
-             * Synchronize the set of Endpoints of this instance with the set of
-             * Endpoints of the conference.
-             */
-            List<Endpoint> conferenceEndpoints = conference.getEndpoints();
-
-            if (endpoints == null)
-            {
-                endpoints = new ArrayList<>(conferenceEndpoints.size());
-                for (Endpoint endpoint : conferenceEndpoints)
-                {
-                    endpoints.add(endpoint);
-                }
-                endpointsChanged = true;
-            }
-            else
-            {
-                /*
-                 * Remove the Endpoints of this instance which are no longer in
-                 * the conference.
-                 */
-                for (Iterator<Endpoint> i = endpoints.iterator(); i.hasNext();)
-                {
-                    Endpoint endpoint = i.next();
-
-                    if (endpoint.isExpired())
-                    {
-                        i.remove();
-                        endpointsChanged = true;
-                    }
-                    else if (conferenceEndpoints.contains(endpoint))
-                    {
-                        conferenceEndpoints.remove(endpoint);
-                    }
-                    else
-                    {
-                        i.remove();
-                        endpointsChanged = true;
-                    }
-                }
-                /*
-                 * Add the Endpoints of the conference which are not in this
-                 * instance yet.
-                 */
-                if (!conferenceEndpoints.isEmpty())
-                {
-                    for (Endpoint endpoint : conferenceEndpoints)
-                    {
-                        endpoints.add(endpoint);
-                    }
-                    endpointsChanged = true;
-                }
-            }
-            this.endpointsChanged = false;
-
-            /*
-             * Make sure that the dominantEndpoint is at the top of the list of
-             * the Endpoints of this instance.
-             */
-            Endpoint dominantEndpoint = getDominantEndpoint();
-
-            if (dominantEndpoint != null)
-            {
-                endpoints.remove(dominantEndpoint);
-                endpoints.add(0, dominantEndpoint);
-            }
+            shouldFireEndpointsChangedEvent = updateEndpoints();
 
             /*
              * The activeSpeakerDetector decides when the dominantEndpoint
@@ -873,17 +795,92 @@ public class ConferenceSpeechActivity
              */
             if (this.dominantEndpointChanged)
             {
-                dominantEndpointChanged = true;
+                shouldFireDominantEndpointChangedEvent = true;
                 this.dominantEndpointChanged = false;
             }
         }
 
-        if (endpointsChanged)
+        if (shouldFireEndpointsChangedEvent)
             firePropertyChange(ENDPOINTS_PROPERTY_NAME, null, null);
-        if (dominantEndpointChanged)
+        if (shouldFireDominantEndpointChangedEvent)
             firePropertyChange(DOMINANT_ENDPOINT_PROPERTY_NAME, null, null);
 
         return true;
+    }
+
+    /**
+     * Synchronize the set of <tt>Endpoint</tt>s of this instance with the set
+     * of <tt>Endpoint</tt>s of the <tt>Conference</tt> and ensure the current
+     * dominant speaker is at the front.
+     *
+     * @return <tt>true</tt> if there were any changes to the sorted list of
+     * <tt>Endpoint</tt>s
+     */
+    private boolean updateEndpoints()
+    {
+        boolean updated = false;
+
+        if (endpoints == null)
+        {
+            initializeEndpoints();
+            updated = true;
+        }
+        else
+        {
+            /*
+             * Remove the Endpoints of this instance which are no longer in
+             * the conference.
+             */
+            for (Iterator<Endpoint> i = endpoints.iterator(); i.hasNext();)
+            {
+                Endpoint endpoint = i.next();
+
+                if (endpoint.isExpired())
+                {
+                    i.remove();
+                    updated = true;
+                }
+                else if (conferenceEndpoints.contains(endpoint))
+                {
+                    conferenceEndpoints.remove(endpoint);
+                }
+                else
+                {
+                    i.remove();
+                    updated = true;
+                }
+            }
+
+            /*
+             * Add the Endpoints of the conference which are not in this
+             * instance yet.
+             */
+            if (!conferenceEndpoints.isEmpty())
+            {
+                for (Endpoint endpoint : conferenceEndpoints)
+                {
+                    endpoints.add(endpoint);
+                }
+
+                updated = true;
+            }
+        }
+
+        this.endpointsChanged = false;
+
+        /*
+         * Make sure that the dominantEndpoint is at the top of the list of
+         * the Endpoints of this instance.
+         */
+        Endpoint dominantEndpoint = getDominantEndpoint();
+
+        if (dominantEndpoint != null)
+        {
+            endpoints.remove(dominantEndpoint);
+            endpoints.add(0, dominantEndpoint);
+        }
+
+        return updated;
     }
 
     /**

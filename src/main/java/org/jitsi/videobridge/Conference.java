@@ -17,7 +17,6 @@ package org.jitsi.videobridge;
 
 import java.beans.*;
 import java.io.*;
-import java.lang.ref.*;
 import java.lang.reflect.*;
 import java.text.*;
 import java.util.*;
@@ -28,6 +27,7 @@ import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
 import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.ColibriConferenceIQ.Recording.*;
 import net.java.sip.communicator.util.*;
 
+import com.google.common.annotations.*;
 import org.jitsi.eventadmin.*;
 import org.jitsi.service.configuration.*;
 import org.jitsi.service.libjitsi.*;
@@ -233,6 +233,7 @@ public class Conference
      * should be considered when generating statistics.
      */
     public Conference(Videobridge videobridge,
+                      ConferenceSpeechActivity speechActivity,
                       String id,
                       String focus,
                       String name,
@@ -244,6 +245,7 @@ public class Conference
             throw new NullPointerException("id");
 
         this.videobridge = videobridge;
+        this.speechActivity = speechActivity;
         this.id = id;
         this.focus = focus;
         this.eventAdmin = enableLogging ? videobridge.getEventAdmin() : null;
@@ -257,8 +259,8 @@ public class Conference
 
         lastKnownFocus = focus;
 
-        speechActivity = new ConferenceSpeechActivity(this);
         speechActivity.addPropertyChangeListener(propertyChangeListener);
+        addPropertyChangeListener(speechActivity.propertyChangeListener);
 
         if (enableLogging)
         {
@@ -423,7 +425,7 @@ public class Conference
      * in order to notify an <tt>Endpoint</tt> that the dominant speaker in this
      * multipoint conference has changed to <tt>dominantSpeaker</tt>
      */
-    private String createDominantSpeakerEndpointChangeEvent(
+    private static String createDominantSpeakerEndpointChangeEvent(
             Endpoint dominantSpeaker)
     {
         return
@@ -693,6 +695,8 @@ public class Conference
                 }
             }
 
+            speechActivity.expire();
+
             // Close the transportManagers of this Conference. Normally, there
             // will be no TransportManager left to close at this point because
             // all Channels have expired and the last Channel to be removed from
@@ -952,7 +956,7 @@ public class Conference
         }
 
         if (changed)
-            firePropertyChange(ENDPOINTS_PROPERTY_NAME, null, null);
+            fireEndpointsChangedEvent();
 
         return endpoint;
     }
@@ -1001,31 +1005,6 @@ public class Conference
      */
     public List<Endpoint> getEndpoints()
     {
-        List<Endpoint> endpoints;
-        boolean changed = false;
-
-        synchronized (this.endpoints)
-        {
-            endpoints = new ArrayList<>(this.endpoints.size());
-            for (Iterator<Endpoint> i = this.endpoints.iterator(); i.hasNext();)
-            {
-                Endpoint endpoint = i.next();
-
-                if (endpoint.isExpired())
-                {
-                    i.remove();
-                    changed = true;
-                }
-                else
-                {
-                    endpoints.add(endpoint);
-                }
-            }
-        }
-
-        if (changed)
-            firePropertyChange(ENDPOINTS_PROPERTY_NAME, null, null);
-
         return endpoints;
     }
 
@@ -1124,10 +1103,12 @@ public class Conference
             }
 
             content = new Content(this, name);
+
             if (isRecording())
             {
                 content.setRecording(true, getRecordingPath());
             }
+
             contents.add(content);
         }
 
@@ -1146,6 +1127,33 @@ public class Conference
         }
 
         return content;
+    }
+
+    /**
+     * For testing only - sets the <tt>List</tt> of <tt>Content</tt>s for this
+     * <tt>Conference</tt>
+     *
+     * @param contents the <tt>List</tt> of <tt>Content</tt>s to set for testing
+     */
+    @VisibleForTesting
+    void setContents(List<Content> contents)
+    {
+        this.contents.clear();
+        this.contents.addAll(contents);
+    }
+
+    /**
+     * For testing only - sets the <tt>List</tt> of <tt>Endpoint</tt>s for this
+     * <tt>Conference</tt>
+     *
+     * @param endpoints this <tt>List</tt> of <tt>Endpoint</tt>s to set for
+     * testing
+     */
+    @VisibleForTesting
+    void setEndpoints(List<Endpoint> endpoints)
+    {
+        this.endpoints.clear();
+        this.endpoints.addAll(endpoints);
     }
 
     /**
@@ -1451,7 +1459,7 @@ public class Conference
         }
 
         if (removed)
-            firePropertyChange(ENDPOINTS_PROPERTY_NAME, null, null);
+            fireEndpointsChangedEvent();
 
         return removed;
     }
@@ -1736,6 +1744,17 @@ public class Conference
         {
             speechActivityEndpointsChanged();
         }
+    }
+
+    /**
+     * Fires a property change for the endpoints property and includes the
+     * the current <tt>List</tt> of <tt>Endpoint</tt>s wrapped in an
+     * unmodifiable <tt>List</tt> on the event as the new value.
+     */
+    private void fireEndpointsChangedEvent()
+    {
+        firePropertyChange(ENDPOINTS_PROPERTY_NAME, null,
+                Collections.unmodifiableList(endpoints));
     }
 
     /**
