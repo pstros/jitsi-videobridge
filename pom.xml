@@ -209,6 +209,19 @@
             </configuration>
           </execution>
           <execution>
+            <id>assembly-linux-arm-bin-archive</id>
+            <phase>package</phase>
+            <goals>
+              <goal>single</goal>
+            </goals>
+            <configuration>
+              <appendAssemblyId>false</appendAssemblyId>
+              <descriptor>src/assembly/linux-arm-bin-archive.xml</descriptor>
+              <finalName>${project.artifactId}-linux-arm-${project.version}</finalName>
+              <skipAssembly>${assembly.skipAssembly}</skipAssembly>
+            </configuration>
+          </execution>
+          <execution>
             <id>assembly-linux-x86-bin-archive</id>
             <phase>package</phase>
             <goals>

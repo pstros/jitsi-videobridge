@@ -42,6 +42,9 @@
         name="packname.lin"
         value="${ant.project.name}-linux-x86-${label}"/>
     <property
+        name="packname.linarm"
+        value="${ant.project.name}-linux-arm-${label}"/>
+    <property
         name="packname.lin64"
         value="${ant.project.name}-linux-x64-${label}"/>
     <property
@@ -146,6 +149,16 @@
                 <os arch="i386" />
             </and>
         </condition>
+        <condition property="run.lib.native" value="linux-arm">
+            <and>
+                <equals
+                        arg1="${os.name}"
+                        arg2="linux"
+                        casesensitive="false"
+                        trim="true"/>
+                <os arch="arm" />
+            </and>
+        </condition>
         <condition
                 else=""
                 property="run.java.library.path"
@@ -170,7 +183,7 @@
             <classpath refid="run.test.classpath"/>
             <sysproperty
                     key="java.library.path"
-                    path="lib/native/linux-64:lib/native/linux:lib/native/mac:lib/native/windows-64:lib/native/windows" />
+                    path="lib/native/linux-64:lib/native/linux-arm:lib/native/linux:lib/native/mac:lib/native/windows-64:lib/native/windows" />
             <test name="org.jitsi.videobridge.VideoBridgeTestSuite"
                   todir="${junit.reports}"/>
         </junit>
@@ -245,6 +258,7 @@
                 <exclude name="native/windows-64/**"/>
                 <exclude name="native/linux/**"/>
                 <exclude name="native/linux-64/**"/>
+                <exclude name="native/linux-arm/**"/>
                 <exclude name="native/macosx/**"/>
             </zipfileset>
             <zipfileset file="resources/install/windows/jvb.bat"
@@ -260,6 +274,7 @@
                 <exclude name="native/windows/**"/>
                 <exclude name="native/linux/**"/>
                 <exclude name="native/linux-64/**"/>
+                <exclude name="native/linux-arm/**"/>
                 <exclude name="native/macosx/**"/>
             </zipfileset>
             <zipfileset file="resources/install/windows-64/jvb.bat"
@@ -274,11 +289,28 @@
             <zipfileset dir="lib" prefix="${packname.lin}/lib">
                 <exclude name="native/windows-64/**"/>
                 <exclude name="native/linux-64/**"/>
+                <exclude name="native/linux-arm/**"/>
                 <exclude name="native/windows/**"/>
                 <exclude name="native/macosx/**"/>
             </zipfileset>
             <zipfileset file="resources/install/linux/jvb.sh"
                         prefix="${packname.lin}" filemode="755"/>
+        </zip>
+    </target>
+
+    <target name="dist.linarm" depends="copy-runtime-dependencies-from-maven,make">
+        <zip destfile="${dist}/linux/${packname.linarm}.zip">
+            <zipfileset file="jitsi-videobridge.jar"
+                        prefix="${packname.linarm}" />
+            <zipfileset dir="lib" prefix="${packname.linarm}/lib">
+                <exclude name="native/windows-64/**"/>
+                <exclude name="native/linux-64/**"/>
+                <exclude name="native/linux/**"/>
+                <exclude name="native/windows/**"/>
+                <exclude name="native/macosx/**"/>
+            </zipfileset>
+            <zipfileset file="resources/install/linux/jvb.sh"
+                        prefix="${packname.linarm}" filemode="755"/>
         </zip>
     </target>
 
@@ -288,6 +320,7 @@
                         prefix="${packname.lin64}" />
             <zipfileset dir="lib" prefix="${packname.lin64}/lib">
                 <exclude name="native/windows-64/**"/>
+                <exclude name="native/linux-arm/**"/>
                 <exclude name="native/linux/**"/>
                 <exclude name="native/windows/**"/>
                 <exclude name="native/macosx/**"/>
@@ -305,6 +338,7 @@
             <zipfileset dir="lib" prefix="${packname.macosx}/lib">
                 <exclude name="native/windows-64/**"/>
                 <exclude name="native/linux/**"/>
+                <exclude name="native/linux-arm/**"/>
                 <exclude name="native/linux-64/**"/>
                 <exclude name="native/windows/**"/>
             </zipfileset>
@@ -327,7 +361,7 @@
     <!-- build all binaries and the jitsi-videobridge.jar
         for all supported platforms -->
     <target name="dist"
-            depends="dist.win,dist.win64,dist.lin,dist.lin64,dist.macosx,dist.src" />
+            depends="dist.win,dist.win64,dist.lin,dist.linarm,dist.lin64,dist.macosx,dist.src" />
 
     <!--
         The easiest way to build the plugin is:
@@ -354,6 +388,12 @@
         <jar compress="true"
              destfile="${dist}/openfire/jitsiVideobridge/lib/jitsi-videobridge-native-linux-64.jar">
             <fileset casesensitive="no" dir="lib/native/linux-64/">
+                <include name="*" />
+            </fileset>
+        </jar>
+        <jar compress="true"
+             destfile="${dist}/openfire/jitsiVideobridge/lib/jitsi-videobridge-native-linux-arm.jar">
+            <fileset casesensitive="no" dir="lib/native/linux-arm/">
                 <include name="*" />
             </fileset>
         </jar>
