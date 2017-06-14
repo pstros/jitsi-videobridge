@@ -416,8 +416,6 @@ public class SimulcastController
             return pktIn;
         }
 
-        BitstreamController bitstreamController = this.bitstreamController;
-
         // Drop SRs from other streams.
         boolean removed = false;
         RTCPIterator it = new RTCPIterator(pktIn);
@@ -919,7 +917,7 @@ public class SimulcastController
                                     tl0PicIdx++;
                                 }
 
-                                dstTL0PICIDX = tl0Idx;
+                                dstTL0PICIDX = tl0PicIdx;
                             }
                         }
 
@@ -1313,7 +1311,7 @@ public class SimulcastController
                                 pktOut.getOffset(), pktOut.getLength() + 1);
                             pktsOut[i] = pktOut;
 
-                            logger.warn("Extending the picture ID of a VP8 pkt.");
+                            logger.debug("Extending the picture ID of a VP8 pkt.");
                         }
 
                         if (!DePacketizer
