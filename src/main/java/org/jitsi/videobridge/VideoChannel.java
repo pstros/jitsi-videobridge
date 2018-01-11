@@ -112,6 +112,12 @@ public class VideoChannel
             ? new int[0] : new int[] { 1, 2 };
 
     /**
+     * The default maximum frame height (in pixels) that can be forwarded to
+     * this participant
+     */
+    private static final int MAX_FRAME_HEIGHT_DEFAULT = 2160;
+
+    /**
      * The {@link Logger} used by the {@link VideoChannel} class to print debug
      * information. Note that instances should use {@link #logger} instead.
      */
@@ -140,6 +146,11 @@ public class VideoChannel
      * The object that implements a hack for LS for this {@link Endpoint}.
      */
     private final LipSyncHack lipSyncHack;
+
+    /**
+     * Maximum frame height, in pixels, for any video stream forwarded to this receiver
+     */
+    private int maxFrameHeight = MAX_FRAME_HEIGHT_DEFAULT;
 
     /**
      * @return the {@link RecurringRunnableExecutor} instance for
@@ -278,20 +289,10 @@ public class VideoChannel
 
         if (changed)
         {
-            Channel[] peerChannels = getContent().getChannels();
-            if (!ArrayUtils.isNullOrEmpty(peerChannels))
-            {
-                for (Channel peerChannel : peerChannels)
-                {
-                    if (peerChannel == this)
-                    {
-                        continue;
-                    }
-
-                    ((VideoChannel) peerChannel)
-                        .bitrateController.update(null, -1);
-                }
-            }
+            getContent().getChannels().stream()
+                .filter(c -> c != this && c instanceof VideoChannel)
+                .forEach(
+                    c -> ((VideoChannel) c).bitrateController.update(null, -1));
         }
 
         return changed;
@@ -323,6 +324,8 @@ public class VideoChannel
         throws IOException
     {
         super.initialize(rtpLevelRelayType);
+
+        bitrateController.update(null, -1);
 
         ((VideoMediaStream) getStream()).getOrCreateBandwidthEstimator()
             .addListener(new BandwidthEstimator.Listener()
@@ -440,7 +443,7 @@ public class VideoChannel
     @Override
     boolean rtpTranslatorWillWrite(
         boolean data,
-        byte[] buffer, int offset, int length,
+        RawPacket pkt,
         RtpChannel source)
     {
         if (!data)
@@ -448,38 +451,34 @@ public class VideoChannel
             return true;
         }
 
-        boolean accept = bitrateController.accept(buffer, offset, length);
+        boolean accept = bitrateController.accept(pkt);
 
         if (accept && lipSyncHack != null)
         {
             lipSyncHack
-                .onRTPTranslatorWillWriteVideo(buffer, offset, length, source);
+                .onRTPTranslatorWillWriteVideo(pkt, source);
         }
 
         return accept;
     }
 
-
     /**
      * {@inheritDoc}
-     *
-     * Fires initial events over the WebRTC data channel of this
-     * <tt>VideoChannel</tt> such as the list of last-n <tt>Endpoint</tt>s whose
-     * video is sent/RTP translated by this <tt>RtpChannel</tt> to its
-     * <tt>Endpoint</tt>.
+     * <p/>
+     * Fires the initial events such as the list of last-n endpoints whose
+     * video is sent/RTP translated by this {@link RtpChannel}.
      */
     @Override
-    void sctpConnectionReady(Endpoint endpoint)
+    void endpointMessageTransportConnected()
     {
-        super.sctpConnectionReady(endpoint);
+        super.endpointMessageTransportConnected();
 
-        if (endpoint.equals(getEndpoint()))
-        {
-            sendLastNEndpointsChangeEvent(
-                bitrateController.getForwardedEndpoints(),
-                null,
-                null);
-        }
+        // Note that it is not ideal, but safe to send this event more than
+        // once (e.g. if the endpoint message transport re-connects).
+        sendLastNEndpointsChangeEvent(
+            bitrateController.getForwardedEndpoints(),
+            null,
+            null);
     }
 
     /**
@@ -639,6 +638,7 @@ public class VideoChannel
         // FIR and PLI.
         boolean supportsFir = false;
         boolean supportsPli = false;
+        boolean supportsRemb = false;
 
         // If we're not given any PTs at all, assume that we shouldn't touch
         // RED.
@@ -668,6 +668,10 @@ public class VideoChannel
                 {
                     supportsPli = true;
                 }
+                else if ("goog-remb".equals(rtcpFb.getAttribute("type")))
+                {
+                    supportsRemb = true;
+                }
             }
         }
 
@@ -679,10 +683,11 @@ public class VideoChannel
         }
 
         MediaStream mediaStream = getStream();
-        if (mediaStream != null)
+        if (mediaStream != null && mediaStream instanceof VideoMediaStreamImpl)
         {
             ((VideoMediaStreamImpl) mediaStream).setSupportsFir(supportsFir);
             ((VideoMediaStreamImpl) mediaStream).setSupportsPli(supportsPli);
+            ((VideoMediaStreamImpl) mediaStream).setSupportsRemb(supportsRemb);
         }
     }
 
@@ -694,7 +699,7 @@ public class VideoChannel
     {
         Endpoint dominantEndpoint = conferenceSpeechActivity.getDominantEndpoint();
 
-        if (getEndpoint().equals(dominantEndpoint))
+        if (dominantEndpoint != null && dominantEndpoint.equals(getEndpoint()))
         {
             // We are the new dominant speaker. We expect other endpoints to
             // mark us as a selected endpoint as soon as they receive the
@@ -751,6 +756,31 @@ public class VideoChannel
     }
 
     /**
+     * Set the maximum frame height, in pixels, of video streams that can be forwarded
+     * to this participant.
+     *
+     * @param maxFrameHeight the maximum frame height, in pixels, of video streams that can be forwarded
+     * to this participant;
+     */
+    public void setMaxFrameHeight(int maxFrameHeight)
+    {
+        this.maxFrameHeight = maxFrameHeight;
+        this.bitrateController.update(null, -1);
+    }
+
+    /**
+     * Get the maximum frame height, in pixels, of video streams that can be forwarded
+     * to this participant.
+     *
+     * @return the maximum frame height, in pixels, of video streams that can be forwarded
+     * to this participant;
+     */
+    public int getMaxFrameHeight()
+    {
+        return this.maxFrameHeight;
+    }
+
+    /**
      * @return the maximum round trip time in milliseconds from other video
      * channels in this channel's content.
      */
@@ -763,7 +793,9 @@ public class VideoChannel
             {
                 long rtt = ((VideoChannel) channel).getRtt();
                 if (maxRtt < rtt)
+                {
                     maxRtt = rtt;
+                }
             }
         }
 
@@ -821,7 +853,8 @@ public class VideoChannel
                             + getStream().hashCode()
                             + ",reason=scheduled");
                     }
-                    rtcpFeedbackMessageSender.sendFIR(ssrc);
+                    rtcpFeedbackMessageSender.
+                        requestKeyframe(ssrc & 0xffff_ffffL);
                 }
             }
         };

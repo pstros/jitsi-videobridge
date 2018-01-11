@@ -150,15 +150,7 @@ public class ConferenceSpeechActivity
      * speaker in this multipoint conference.
      */
     private final ActiveSpeakerChangedListener activeSpeakerChangedListener
-        = new ActiveSpeakerChangedListener()
-                {
-                    @Override
-                    public void activeSpeakerChanged(long ssrc)
-                    {
-                        ConferenceSpeechActivity.this.activeSpeakerChanged(
-                                ssrc);
-                    }
-                };
+        = ConferenceSpeechActivity.this::activeSpeakerChanged;
 
     /**
      * The <tt>ActiveSpeakerDetector</tt> which detects/identifies the
@@ -555,7 +547,9 @@ public class ConferenceSpeechActivity
             {
                 dominantEndpoint = this.dominantEndpoint;
                 if (dominantEndpoint.isExpired())
+                {
                     this.dominantEndpoint = null;
+                }
             }
         }
         return dominantEndpoint;
@@ -612,21 +606,13 @@ public class ConferenceSpeechActivity
                     List<Endpoint> conferenceEndpoints
                         = conference.getEndpoints();
 
-                    endpoints = new ArrayList<>(conferenceEndpoints.size());
-                    for (Endpoint endpoint : conferenceEndpoints)
-                        endpoints.add(endpoint);
+                    endpoints = new ArrayList<>(conferenceEndpoints);
                 }
             }
 
             // The return value is the list of Endpoints of this instance.
-            ret = new ArrayList<>(endpoints.size());
-            for (Iterator<Endpoint> i = endpoints.iterator(); i.hasNext();)
-            {
-                Endpoint endpoint = i.next();
-
-                if (endpoint != null)
-                    ret.add(endpoint);
-            }
+            ret = new ArrayList<>(endpoints);
+            ret.removeIf(Objects::isNull);
         }
         return ret;
     }
@@ -652,13 +638,17 @@ public class ConferenceSpeechActivity
             = getActiveSpeakerDetector();
 
         if (activeSpeakerDetector != null)
+        {
             activeSpeakerDetector.levelChanged(ssrc, level);
+        }
 
         // Endpoint
         Endpoint endpoint = channel.getEndpoint();
 
         if (endpoint != null)
+        {
             endpoint.audioLevelChanged(channel, ssrc, level);
+        }
     }
 
     /**
@@ -714,7 +704,9 @@ public class ConferenceSpeechActivity
         Conference conference = getConference();
 
         if (conference == null)
+        {
             return;
+        }
 
         String propertyName = ev.getPropertyName();
 
@@ -766,7 +758,9 @@ public class ConferenceSpeechActivity
              * soon as this ConferenceSpeechActivity stops employing it.
              */
             if (this.eventDispatcher != eventDispatcher)
+            {
                 return false;
+            }
 
             /*
              * As soon as the Conference associated with this instance expires,
@@ -775,7 +769,9 @@ public class ConferenceSpeechActivity
             Conference conference = getConference();
 
             if (conference == null)
+            {
                 return false;
+            }
 
             long now = System.currentTimeMillis();
 
@@ -806,11 +802,7 @@ public class ConferenceSpeechActivity
 
             if (endpoints == null)
             {
-                endpoints = new ArrayList<>(conferenceEndpoints.size());
-                for (Endpoint endpoint : conferenceEndpoints)
-                {
-                    endpoints.add(endpoint);
-                }
+                endpoints = new ArrayList<>(conferenceEndpoints);
                 endpointsChanged = true;
             }
             else
@@ -819,37 +811,16 @@ public class ConferenceSpeechActivity
                  * Remove the Endpoints of this instance which are no longer in
                  * the conference.
                  */
-                for (Iterator<Endpoint> i = endpoints.iterator(); i.hasNext();)
-                {
-                    Endpoint endpoint = i.next();
+                endpointsChanged
+                    = endpoints.removeIf(
+                        e -> e.isExpired() || !conferenceEndpoints.contains(e));
+                conferenceEndpoints.removeAll(endpoints);
 
-                    if (endpoint.isExpired())
-                    {
-                        i.remove();
-                        endpointsChanged = true;
-                    }
-                    else if (conferenceEndpoints.contains(endpoint))
-                    {
-                        conferenceEndpoints.remove(endpoint);
-                    }
-                    else
-                    {
-                        i.remove();
-                        endpointsChanged = true;
-                    }
-                }
                 /*
                  * Add the Endpoints of the conference which are not in this
                  * instance yet.
                  */
-                if (!conferenceEndpoints.isEmpty())
-                {
-                    for (Endpoint endpoint : conferenceEndpoints)
-                    {
-                        endpoints.add(endpoint);
-                    }
-                    endpointsChanged = true;
-                }
+                endpointsChanged |= endpoints.addAll(conferenceEndpoints);
             }
             this.endpointsChanged = false;
 
@@ -877,9 +848,13 @@ public class ConferenceSpeechActivity
         }
 
         if (endpointsChanged)
+        {
             firePropertyChange(ENDPOINTS_PROPERTY_NAME, null, null);
+        }
         if (dominantEndpointChanged)
+        {
             firePropertyChange(DOMINANT_ENDPOINT_PROPERTY_NAME, null, null);
+        }
 
         return true;
     }
@@ -932,7 +907,9 @@ public class ConferenceSpeechActivity
                     ConferenceSpeechActivity owner = this.owner.get();
 
                     if ((owner == null) || !owner.runInEventDispatcher(this))
+                    {
                         break;
+                    }
                 }
                 while (true);
             }

@@ -105,15 +105,7 @@ public class AudioChannel
     {
         if (csrcAudioLevelListener == null)
         {
-            csrcAudioLevelListener
-                = new CsrcAudioLevelListener()
-                {
-                    @Override
-                    public void audioLevelsReceived(long[] levels)
-                    {
-                        streamAudioLevelsReceived(levels);
-                    }
-                };
+            csrcAudioLevelListener = this::streamAudioLevelsReceived;
         }
         return csrcAudioLevelListener;
     }
@@ -132,15 +124,7 @@ public class AudioChannel
     {
         if (streamAudioLevelListener == null)
         {
-            streamAudioLevelListener
-                = new SimpleAudioLevelListener()
-                {
-                    @Override
-                    public void audioLevelChanged(int level)
-                    {
-                        streamAudioLevelChanged(level);
-                    }
-                };
+            streamAudioLevelListener = this::streamAudioLevelChanged;
         }
         return streamAudioLevelListener;
     }
@@ -323,7 +307,7 @@ public class AudioChannel
     @Override
     boolean rtpTranslatorWillWrite(
         boolean data,
-        byte[] buffer, int offset, int length,
+        RawPacket pkt,
         RtpChannel source)
     {
         if (!data)
@@ -348,7 +332,7 @@ public class AudioChannel
         if (associatedLipSyncHack != null)
         {
             associatedLipSyncHack.onRTPTranslatorWillWriteAudio(
-                buffer, offset, length, source);
+                pkt, source);
         }
 
         return true;

@@ -33,7 +33,6 @@ import org.ice4j.socket.*;
 import org.jitsi.eventadmin.*;
 import org.jitsi.impl.neomedia.*;
 import org.jitsi.impl.neomedia.rtp.*;
-import org.jitsi.impl.neomedia.rtp.translator.*;
 import org.jitsi.impl.neomedia.transform.*;
 import org.jitsi.impl.neomedia.transform.zrtp.*;
 import org.jitsi.service.configuration.*;
@@ -42,10 +41,12 @@ import org.jitsi.service.neomedia.device.*;
 import org.jitsi.service.neomedia.format.*;
 import org.jitsi.service.neomedia.recording.*;
 import org.jitsi.service.neomedia.stats.*;
+import org.jitsi.util.*;
 import org.jitsi.util.Logger;
 import org.jitsi.util.event.*;
 import org.jitsi.videobridge.transform.*;
 import org.jitsi.videobridge.xmpp.*;
+import org.jxmpp.jid.*;
 
 /**
  * Represents channel in the terms of Jitsi Videobridge.
@@ -237,6 +238,11 @@ public class RtpChannel
     protected final Statistics statistics = new Statistics();
 
     /**
+     * The <tt>Set</tt> of the SSRCs that this <tt>RtpChannel</tt> has signaled.
+     */
+    private Set<Integer> signaledSSRCs = new HashSet<>();
+
+    /**
      * Initializes a new <tt>Channel</tt> instance which is to have a specific
      * ID. The initialization is to be considered requested by a specific
      * <tt>Content</tt>.
@@ -385,10 +391,12 @@ public class RtpChannel
                          * will be provided to the focus by the Jitsi
                          * Videobridge server.
                          */
-                        int ssrc = RTPTranslatorImpl.readInt(data, offset + 4);
+                        int ssrc = RTPUtils.readInt(data, offset + 4);
 
                         if (removeReceiveSSRC(ssrc))
+                        {
                             notifyFocus();
+                        }
                     }
                 }
             }
@@ -500,7 +508,7 @@ public class RtpChannel
                      * streams that they send. The information will be provided
                      * to the focus by the Jitsi Videobridge server.
                      */
-                    int ssrc = RTPTranslatorImpl.readInt(data, off + 8);
+                    int ssrc = RTPUtils.readInt(data, off + 8);
                     boolean notify;
 
                     try
@@ -573,7 +581,9 @@ public class RtpChannel
                     }
 
                     if (notify)
+                    {
                         notifyFocus();
+                    }
                 }
             }
         }
@@ -598,8 +608,7 @@ public class RtpChannel
      * #receiveSSRCs} would have exceeded {@link #MAX_RECEIVE_SSRCS} with the
      * addition of the new SSRC.
      */
-    private boolean addReceiveSSRC(int receiveSSRC,
-                                                boolean checkLimit)
+    private boolean addReceiveSSRC(int receiveSSRC, boolean checkLimit)
         throws SizeExceededException
     {
         synchronized (receiveSSRCsSyncRoot)
@@ -895,7 +904,7 @@ public class RtpChannel
                 = mediaService.createMediaStream(
                         null,
                         mediaType,
-                        getDtlsControl());
+                        getSrtpControl());
 
              // Add the PropertyChangeListener to the MediaStream prior to
              // performing further initialization so that we do not miss changes
@@ -928,7 +937,9 @@ public class RtpChannel
              * rtpLevelRelayType is to not be changed.
              */
             if (rtpLevelRelayType != null)
+            {
                 setRTPLevelRelayType(rtpLevelRelayType);
+            }
 
             // The transport manager could be already connected, in which case
             // (since we just created the stream), any previous calls to
@@ -975,13 +986,18 @@ public class RtpChannel
         synchronized (streamSyncRoot)
         {
             if (stream == null)
+            {
                 return;
+            }
         }
 
         RetransmissionRequester retransmissionRequester
             = stream.getRetransmissionRequester();
         if (retransmissionRequester != null)
-            retransmissionRequester.setSenderSsrc(getContent().getInitialLocalSSRC());
+        {
+            retransmissionRequester
+                .setSenderSsrc(getContent().getInitialLocalSSRC());
+        }
 
         MediaStreamTarget streamTarget = createStreamTarget();
         StreamConnector connector = getStreamConnector();
@@ -1028,7 +1044,9 @@ public class RtpChannel
              * before starting the stream.
              */
             if (RTPLevelRelayType.MIXER.equals(getRTPLevelRelayType()))
+            {
                 stream.setSSRCFactory(new SSRCFactoryImpl(initialLocalSSRC));
+            }
 
             synchronized (streamSyncRoot) // Otherwise, races with stream.setDirection().
             {
@@ -1059,10 +1077,12 @@ public class RtpChannel
     {
         Content content = getContent();
         Conference conference = content.getConference();
-        String focus = conference.getFocus();
+        Jid focus = conference.getFocus();
 
         if (focus == null)
+        {
             return;
+        }
 
         Collection<ComponentImpl> components
             = conference.getVideobridge().getComponents();
@@ -1084,19 +1104,25 @@ public class RtpChannel
                 contentIQ.addChannel(channelIQ);
 
                 conferenceIQ.setTo(focus);
-                conferenceIQ.setType(org.jivesoftware.smack.packet.IQ.Type.SET);
+                conferenceIQ.setType(org.jivesoftware.smack.packet.IQ.Type.set);
 
                 for (ComponentImpl component : components)
+                {
                     component.send(conferenceIQ);
+                }
             }
             catch (Throwable t)
             {
                 // A telephony conference will still function, albeit with
                 // reduced SSRC-dependent functionality such as audio levels.
                 if (t instanceof InterruptedException)
+                {
                     Thread.currentThread().interrupt();
+                }
                 else if (t instanceof ThreadDeath)
+                {
                     throw (ThreadDeath) t;
+                }
             }
         }
     }
@@ -1225,9 +1251,13 @@ public class RtpChannel
         catch (Throwable t)
         {
             if (t instanceof InterruptedException)
+            {
                 Thread.currentThread().interrupt();
+            }
             else if (t instanceof ThreadDeath)
+            {
                 throw (ThreadDeath) t;
+            }
         }
     }
 
@@ -1253,32 +1283,29 @@ public class RtpChannel
      * <tt>Channel</tt> into this destination <tt>Channel</tt>.
      *
      * @param data
-     * @param buffer
-     * @param offset
-     * @param length
+     * @param pkt
      * @param source
      * @return <tt>true</tt> to allow the <tt>RTPTranslator</tt> to write the
      * specified packet/<tt>buffer</tt> into this <tt>Channel</tt>; otherwise,
      * <tt>false</tt>
      */
     boolean rtpTranslatorWillWrite(
-            boolean data,
-            byte[] buffer, int offset, int length,
-            RtpChannel source)
+        boolean data,
+        RawPacket pkt,
+        RtpChannel source)
     {
         return true;
     }
 
     /**
-     * Notifies this <tt>RtpChannel</tt> that its associated
-     * <tt>SctpConnection</tt> has become ready i.e. connected to the remote
-     * peer and operational.
+     * Notifies this {@link RtpChannel} that its associated {@link Endpoint}'s
+     * message transport has become ready i.e. connected to the remote peer and
+     * operational.
      *
-     * @param endpoint the <tt>Endpoint</tt> which is the source of the
-     * notification and through which an <tt>SctpConnection</tt> is associated
-     * with this <tt>RtpChannel</tt>
+     * Note that this may happen more than once (e.g. if the client opens a new
+     * web-socket).
      */
-    void sctpConnectionReady(Endpoint endpoint)
+    void endpointMessageTransportConnected()
     {
     }
 
@@ -1295,7 +1322,9 @@ public class RtpChannel
     {
         // XXX We modify the stream direction only after latching has finished.
         if (streamTarget.getDataAddress() != null)
+        {
             stream.setDirection(direction);
+        }
 
         touch(); // It seems this Channel is still active.
     }
@@ -1383,6 +1412,8 @@ public class RtpChannel
     {
         if ((rtpHeaderExtensions != null) && (rtpHeaderExtensions.size() > 0))
         {
+            stream.clearRTPExtensions();
+
             for (RTPHdrExtPacketExtension rtpHdrExtPacketExtension
                     : rtpHeaderExtensions)
             {
@@ -1439,7 +1470,9 @@ public class RtpChannel
         // It is safe to just add it, MediaStream will take care of duplicates.
         MediaStream stream = getStream();
         if (stream != null)
+        {
             stream.addRTPExtension(id, new RTPExtension(uri));
+        }
     }
 
     /**
@@ -1455,7 +1488,9 @@ public class RtpChannel
     public void setRTPLevelRelayType(RTPLevelRelayType rtpLevelRelayType)
     {
         if (rtpLevelRelayType == null)
+        {
             throw new NullPointerException("rtpLevelRelayType");
+        }
 
         if (this.rtpLevelRelayType == null)
         {
@@ -1485,7 +1520,9 @@ public class RtpChannel
                  * media it generates.
                  */
                 if (stream.getFormat() == null)
+                {
                     stream.setDirection(MediaDirection.RECVONLY);
+                }
                 break;
 
             case TRANSLATOR:
@@ -1621,11 +1658,6 @@ public class RtpChannel
     }
 
     /**
-     * The <tt>Set</tt> of the SSRCs that this <tt>RtpChannel</tt> has signaled.
-     */
-    private Set<Integer> signaledSSRCs = new HashSet<>();
-
-    /**
      * Sets the <tt>Set</tt> of the SSRCs that this <tt>RtpChannel</tt> has
      * signaled and updates the <tt>Content</tt> SSRCs accordingly.
      *
@@ -1637,7 +1669,9 @@ public class RtpChannel
     public void setSources(List<SourcePacketExtension> sources)
     {
         if (sources == null || sources.isEmpty())
+        {
             return;
+        }
 
         synchronized (receiveSSRCsSyncRoot)
         {
@@ -1650,7 +1684,9 @@ public class RtpChannel
         {
             long ssrc = source.getSSRC();
             if (ssrc != -1)
+            {
                 newSignaledSSRCs.add((int) ssrc);
+            }
         }
 
         // Add the added SSRCs.
@@ -1682,8 +1718,9 @@ public class RtpChannel
                     // instance used by RecorderRtpImpl.
                     if (recorder != null && endpoint != null && synchronizer != null)
                     {
-                        synchronizer.setEndpoint(addedSSRC & 0xffffffffl,
-                            endpoint.getID());
+                        synchronizer.setEndpoint(
+                                addedSSRC & 0xffffffffl,
+                                endpoint.getID());
                     }
                 }
                 catch (SizeExceededException see)
@@ -1699,7 +1736,9 @@ public class RtpChannel
         if (!oldSignaledSSRCs.isEmpty())
         {
             for (Integer removedSSRC : oldSignaledSSRCs)
+            {
                 removeReceiveSSRC(removedSSRC);
+            }
         }
 
         // Set the newly signaled ssrcs.
@@ -1868,8 +1907,8 @@ public class RtpChannel
             return false;
         }
 
-        this.setSources(sources); // TODO remove and rely on MSTs.
-        this.setSourceGroups(sourceGroups); // TODO remove and rely on MSTs.
+        setSources(sources); // TODO remove and rely on MSTs.
+        setSourceGroups(sourceGroups); // TODO remove and rely on MSTs.
 
         MediaStreamTrackReceiver
             mediaStreamTrackReceiver = stream.getMediaStreamTrackReceiver();
@@ -1880,10 +1919,7 @@ public class RtpChannel
                 = MediaStreamTrackFactory.createMediaStreamTracks(
                     mediaStreamTrackReceiver, sources, sourceGroups);
 
-            boolean changed
-                = mediaStreamTrackReceiver.setMediaStreamTracks(newTracks);
-
-            return changed;
+            return mediaStreamTrackReceiver.setMediaStreamTracks(newTracks);
         }
         else
         {

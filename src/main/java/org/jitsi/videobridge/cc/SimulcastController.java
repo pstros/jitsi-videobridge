@@ -83,6 +83,11 @@ public class SimulcastController
         cfg != null && cfg.getBoolean(ENABLE_VP8_PICID_REWRITING_PNAME, false);
 
     /**
+     * Index used to represent that forwarding is suspended.
+     */
+    private static final int SUSPENDED_INDEX = -1;
+
+    /**
      * The {@link Logger} to be used by this instance to print debug
      * information.
      */
@@ -103,7 +108,7 @@ public class SimulcastController
      * The SSRC to protect when probing for bandwidth and for RTP/RTCP packet
      * rewritting.
      */
-    private final long targetSSRC;
+    private final long targetSsrc;
 
     /**
      * The running index for the temporal base layer frames, i.e., the frames
@@ -135,11 +140,11 @@ public class SimulcastController
         RTPEncodingDesc[] rtpEncodings = source.getRTPEncodings();
         if (ArrayUtils.isNullOrEmpty(rtpEncodings))
         {
-            targetSSRC = -1;
+            targetSsrc = -1;
         }
         else
         {
-            targetSSRC = rtpEncodings[0].getPrimarySSRC();
+            targetSsrc = rtpEncodings[0].getPrimarySSRC();
         }
 
         bitstreamController = new BitstreamController();
@@ -154,129 +159,142 @@ public class SimulcastController
      */
     long getTargetSSRC()
     {
-        return targetSSRC;
+        return targetSsrc;
+    }
+
+    /**
+     * Given the current base layer index, the target base layer index and the
+     * base layer index of an incoming frame, returns whether the incoming
+     * frame's base layer represents a step closer (or all the way to) the
+     * target index we're trying to reach.  In either case (downscale or
+     * upscale), 'incomingFrameBaseLayerIndex' will be desirable if it falls
+     * in the range (currentBaseLayerIndex, targetBaseLayerIndex] OR
+     * [targetBaseLayerIndex, currentBaseLayerIndex) e.g.:
+     *
+     * currentBaseLayerIndex = 0, incomingFrameBaseLayerIndex = 2,
+     * targetBaseLayerIndex = 7 -> we're trying to upscale and incomingFrameBaseLayerIndex
+     * represents a quality higher than what we currently have (but not the final
+     * target) so forwarding it is a step in the right direction.
+     * @param currentBaseLayerIndex the base layer index of the stream currently
+     * being forwarded
+     * @param incomingFrameBaseLayerIndex the base layer index to which the
+     * current incoming frame belongs
+     * @param targetBaseLayerIndex the base layer index of the stream we want to forward
+     * @return true if the stream represented by incomingFrameBaseLayerIndex
+     * represents a step closer (or all the way) to the targetBaseLayerIndex
+     */
+    private boolean shouldSwitchToBaseLayer(
+        int currentBaseLayerIndex, int incomingFrameBaseLayerIndex, int targetBaseLayerIndex)
+    {
+        if ((currentBaseLayerIndex < incomingFrameBaseLayerIndex) &&
+            incomingFrameBaseLayerIndex <= targetBaseLayerIndex)
+        {
+            // upscale case
+            return true;
+        }
+        else if ((currentBaseLayerIndex > incomingFrameBaseLayerIndex) &&
+            (incomingFrameBaseLayerIndex >= targetBaseLayerIndex))
+        {
+            // downscale case
+            return true;
+        }
+        return false;
     }
 
     /**
      * Defines a packet filter that controls which packets to be written into
      * some arbitrary target/receiver that owns this {@link SimulcastController}.
      *
-     * @param buf the <tt>byte</tt> array that holds the packet.
-     * @param off the offset in <tt>buffer</tt> at which the actual data begins.
-     * @param len the number of <tt>byte</tt>s in <tt>buffer</tt> which
-     * constitute the actual data.
+     * @param pkt the packet to decide whether or not to accept
      * @return <tt>true</tt> to allow the specified packet/<tt>buffer</tt> to be
      * written into the arbitrary target/receiver that owns this
      * {@link SimulcastController} ; otherwise, <tt>false</tt>
      */
-    public boolean accept(byte[] buf, int off, int len)
+    public boolean accept(RawPacket pkt)
     {
-        int targetIndex = bitstreamController.getTargetIndex()
-            , currentIndex = bitstreamController.getCurrentIndex();
-
-        // if the target is set to suspend and it's not already suspended, then
-        // suspend the stream.
-        if (targetIndex < 0 && currentIndex > -1)
+        if (pkt.isInvalid())
         {
-            bitstreamController.setTL0Idx(-1);
             return false;
         }
+
+        int targetIndex = bitstreamController.getTargetIndex(),
+            currentIndex = bitstreamController.getCurrentIndex();
+
+        // If we're suspended, we won't forward anything
+        if (targetIndex == SUSPENDED_INDEX)
+        {
+            // Update the bitstreamController if it hasn't suspended yet
+            if (currentIndex != SUSPENDED_INDEX)
+            {
+                bitstreamController.suspend();
+            }
+            return false;
+        }
+        // At this point we know we *want* to be forwarding something
 
         MediaStreamTrackDesc sourceTrack = weakSource.get();
         assert sourceTrack != null;
-        FrameDesc sourceFrameDesc = sourceTrack.findFrameDesc(buf, off, len);
+        FrameDesc sourceFrameDesc =
+            sourceTrack.findFrameDesc(pkt.getSSRCAsLong(), pkt.getTimestamp());
 
-        if (sourceFrameDesc == null || buf == null || off < 0
-            || len < RawPacket.FIXED_HEADER_SIZE || buf.length < off + len)
+        if (sourceFrameDesc == null)
         {
             return false;
         }
 
-        RTPEncodingDesc sourceEncodings[] = sourceTrack.getRTPEncodings();
+        RTPEncodingDesc[] sourceEncodings = sourceTrack.getRTPEncodings();
 
-        // If we're getting packets here => there must be at least 1 encoding.
         if (ArrayUtils.isNullOrEmpty(sourceEncodings))
         {
             return false;
         }
 
-        // if the TL0 of the forwarded stream is suspended, we MUST downscale.
-        boolean currentTL0IsActive = false;
-        int currentTL0Idx = currentIndex;
-        if (currentTL0Idx > -1)
+        int sourceLayerIndex = sourceFrameDesc.getRTPEncoding().getIndex();
+
+        // At this point we know we *want* to be forwarding something, but the
+        // current layer we're forwarding is still sending, so we're not "desperate"
+        int currentBaseLayerIndex;
+        if (currentIndex == SUSPENDED_INDEX ||
+            !sourceEncodings[currentIndex].getBaseLayer().isActive(true))
         {
-            currentTL0Idx
-                = sourceEncodings[currentTL0Idx].getBaseLayer().getIndex();
-
-            currentTL0IsActive = sourceEncodings[currentTL0Idx].isActive(true);
-        }
-
-        int targetTL0Idx = targetIndex;
-        if (targetTL0Idx > -1)
-        {
-            targetTL0Idx
-                = sourceEncodings[targetTL0Idx].getBaseLayer().getIndex();
-        }
-
-        if (currentTL0Idx == targetTL0Idx
-            && (currentTL0IsActive || targetTL0Idx < 0 /* => currentIdx < 0 */))
-        {
-            // An intra-codec/simulcast switch is NOT pending.
-            long sourceSSRC = sourceFrameDesc.getRTPEncoding().getPrimarySSRC();
-            boolean accept = sourceSSRC == bitstreamController.getTL0SSRC();
-
-            if (!accept)
-            {
-                return false;
-            }
-
-            // Give the bitstream filter a chance to drop the packet.
-            return bitstreamController.accept(sourceFrameDesc, buf, off, len);
-        }
-
-        // An intra-codec/simulcast switch pending.
-
-        boolean sourceTL0IsActive = false;
-        int sourceTL0Idx = sourceFrameDesc.getRTPEncoding().getIndex();
-        if (sourceTL0Idx > -1)
-        {
-            sourceTL0Idx
-                = sourceEncodings[sourceTL0Idx].getBaseLayer().getIndex();
-
-            sourceTL0IsActive = sourceEncodings[sourceTL0Idx].isActive(true);
-        }
-
-        if (!sourceFrameDesc.isIndependent()
-            || !sourceTL0IsActive // TODO this condition needs review
-            || sourceTL0Idx == currentTL0Idx)
-        {
-            // An intra-codec switch requires a key frame.
-
-            long sourceSSRC = sourceFrameDesc.getRTPEncoding().getPrimarySSRC();
-            boolean accept = sourceSSRC == bitstreamController.getTL0SSRC();
-
-            if (!accept)
-            {
-                return false;
-            }
-
-            // Give the bitstream filter a chance to drop the packet.
-            return bitstreamController.accept(sourceFrameDesc, buf, off, len);
-        }
-
-        if ((targetTL0Idx <= sourceTL0Idx && sourceTL0Idx < currentTL0Idx)
-            || (currentTL0Idx < sourceTL0Idx && sourceTL0Idx <= targetTL0Idx)
-            || (!currentTL0IsActive && sourceTL0Idx <= targetTL0Idx))
-        {
-            bitstreamController.setTL0Idx(sourceTL0Idx);
-
-            // Give the bitstream filter a chance to drop the packet.
-            return bitstreamController.accept(sourceFrameDesc, buf, off, len);
+            currentBaseLayerIndex = SUSPENDED_INDEX;
         }
         else
         {
+            currentBaseLayerIndex = sourceEncodings[currentIndex].getBaseLayer().getIndex();
+        }
+        int sourceBaseLayerIndex = sourceEncodings[sourceLayerIndex].getBaseLayer().getIndex();
+        if (sourceBaseLayerIndex == currentBaseLayerIndex)
+        {
+            // Regardless of whether a switch is pending or not, if an incoming
+            // frame belongs to the current stream being forwarded, we'll
+            // accept it (if the bitstreamController lets it through)
+            return bitstreamController.accept(sourceFrameDesc, pkt);
+        }
+
+        // At this point we know that we want to be forwarding something and
+        // that the incoming frame doesn't belong to the one we're currently
+        // forwarding, so we need to check if there is a layer switch
+        // pending and this frame brings us to (or closer to) the stream we want
+        if (!sourceFrameDesc.isIndependent())
+        {
+            // If it's not a keyframe we can't switch to it anyway
             return false;
         }
+        int targetBaseLayerIndex = sourceEncodings[targetIndex].getBaseLayer().getIndex();
+
+        if (currentBaseLayerIndex != targetBaseLayerIndex)
+        {
+            // We do want to switch to another layer
+            if (shouldSwitchToBaseLayer(currentBaseLayerIndex, sourceBaseLayerIndex, targetBaseLayerIndex))
+            {
+                // This frame represents, at least, a step in the right direction
+                // towards the stream we want
+                bitstreamController.setTL0Idx(sourceBaseLayerIndex);
+                return bitstreamController.accept(sourceFrameDesc, pkt);
+            }
+        }
+        return false;
     }
 
     /**
@@ -355,7 +373,7 @@ public class SimulcastController
 
             ((RTPTranslatorImpl) sourceStream.getRTPTranslator())
                 .getRtcpFeedbackMessageSender().sendFIR(
-                (int) targetSSRC);
+                (int) targetSsrc);
         }
     }
 
@@ -387,14 +405,14 @@ public class SimulcastController
         RawPacket[] pktsOut = bitstreamController.rtpTransform(pktIn);
 
         if (!ArrayUtils.isNullOrEmpty(pktsOut)
-            && pktIn.getSSRCAsLong() != targetSSRC)
+            && pktIn.getSSRCAsLong() != targetSsrc)
         {
             // Rewrite the SSRC of the output RTP stream.
             for (RawPacket pktOut : pktsOut)
             {
                 if (pktOut != null)
                 {
-                    pktOut.setSSRC((int) targetSSRC);
+                    pktOut.setSSRC((int) targetSsrc);
                 }
             }
         }
@@ -443,7 +461,7 @@ public class SimulcastController
                     bitstreamController.rtcpTransform(baf);
 
                     // Rewrite senderSSRC
-                    RTCPHeaderUtils.setSenderSSRC(baf, (int) targetSSRC);
+                    RTCPHeaderUtils.setSenderSSRC(baf, (int) targetSsrc);
                 }
                 break;
                 case RTCPPacket.BYE:
@@ -499,14 +517,18 @@ public class SimulcastController
     {
         /**
          * The available subjective quality indexes that this RTP stream offers.
+         * NOTE: this refers to the available qualities for the current stream
+         * only.  a non-adaptive stream would only have 1, an adaptive stream
+         * would have multiple for each of its layers.
          */
-        private int[] availableIdx;
+        private int[] availableQualityIndices;
 
         /**
          * A boolean that indicates whether or not the current TL0 is adaptive
-         * or not.
+         * (meaning it has multiple quality layers within the same rtp stream) or
+         * not.
          */
-        private boolean adaptive;
+        private boolean isAdaptive;
 
         /**
          * The sequence number offset that this bitstream started. The initial
@@ -547,7 +569,7 @@ public class SimulcastController
          * The special value -1 indicates that we're not accepting (and hence
          * not forwarding) anything.
          */
-        private long tl0SSRC = -1;
+        private long tl0Ssrc = -1;
 
         /**
          * The subjective quality index for of the TL0 of this instance.
@@ -590,15 +612,15 @@ public class SimulcastController
         private long transmittedPackets = 0;
 
         /**
-         * The most recent (mr) key frame that we've sent out. Anything that's
+         * The most recent key frame that we've sent out. Anything that's
          * accepted by this controller needs to be newer than this.
          */
-        private SeenFrame mrKeyFrame;
+        private SeenFrame mostRecentSentKeyFrame;
 
         /**
          * The max (biggest timestamp) frame that we've sent out.
          */
-        private SeenFrame maxSentFrame;
+        private SeenFrame mostRecentSentFrame;
 
         /**
          * The {@link SeenFrameAllocator} for this {@link BitstreamController}.
@@ -630,6 +652,11 @@ public class SimulcastController
             }
         });
 
+        public void suspend()
+        {
+            setTL0Idx(-1);
+        }
+
         /**
          *
          * @param newTL0Idx
@@ -651,13 +678,13 @@ public class SimulcastController
 
             this.seenFrames.clear();
 
-            this.mrKeyFrame = null;
-            if (maxSentFrame != null)
+            this.mostRecentSentKeyFrame = null;
+            if (mostRecentSentFrame != null)
             {
                 this.tsOff = getMaxTs();
                 this.seqNumOff = getMaxSeqNum();
                 this.pidOff = getMaxPictureID();
-                this.maxSentFrame = null;
+                this.mostRecentSentFrame = null;
             }
 
             this.pidDelta = -1;
@@ -685,14 +712,14 @@ public class SimulcastController
             }
             if (ArrayUtils.isNullOrEmpty(rtpEncodings) || tl0Idx < 0)
             {
-                this.availableIdx = null;
-                this.tl0SSRC = -1;
-                this.adaptive = false;
+                this.availableQualityIndices = null;
+                this.tl0Ssrc = -1;
+                this.isAdaptive = false;
             }
             else
             {
                 tl0Idx = rtpEncodings[tl0Idx].getBaseLayer().getIndex();
-                tl0SSRC = rtpEncodings[tl0Idx].getPrimarySSRC();
+                tl0Ssrc = rtpEncodings[tl0Idx].getPrimarySSRC();
 
                 // find the available qualities in this bitstream.
 
@@ -706,15 +733,56 @@ public class SimulcastController
                     }
                 }
 
-                availableIdx = new int[availableQualities.size()];
+                availableQualityIndices = new int[availableQualities.size()];
                 Iterator<Integer> iterator = availableQualities.iterator();
-                for (int i = 0; i < availableIdx.length; i++)
+                for (int i = 0; i < availableQualityIndices.length; i++)
                 {
-                    availableIdx[i] = iterator.next();
+                    availableQualityIndices[i] = iterator.next();
                 }
 
-                this.adaptive = availableIdx.length > 1;
+                this.isAdaptive = availableQualityIndices.length > 1;
             }
+        }
+
+        /**
+         * Given a list of available quality indices for the current stream
+         * and a target index, find the highest available quality index <= targetIdx.
+         * Note that targetIdx may be pointing at a different stream, i.e.
+         * availableQualityIndices may be {7, 8, 9} and targetIdx could be 3.
+         * We won't change the stream we're sending, but will find the max index
+         * that is both in the current stream and is less than the targetIdx,
+         * if it exists
+         * @param availableQualityIndices the available quality indices
+         * @param targetIdx the target index
+         * @return the highest quality index <= targetIdx
+         * //FIXME(brian): this could be static, but can't add a static method
+         * to the inner class.  should it be put elsewhere and made a static
+         * helper method? (the outer class?)
+         */
+        private int findMaximumQualityIndex(int[] availableQualityIndices, int targetIdx)
+        {
+            int maxIndex = -1;
+            if (availableQualityIndices != null && availableQualityIndices.length > 0)
+            {
+                // At the very least we will send the lowest quality layer of
+                // the current stream.  If there happens to be an additional,
+                // higher index of this stream that is also <= targetIdx, we will
+                // upgrade to that
+                maxIndex = availableQualityIndices[0];
+                for (int i = 1; i < availableQualityIndices.length; ++i)
+                {
+                    if (availableQualityIndices[i] <= targetIdx)
+                    {
+                        maxIndex = availableQualityIndices[i];
+                    }
+                    else
+                    {
+                        break;
+                    }
+                }
+
+            }
+            return maxIndex;
         }
 
         /**
@@ -724,18 +792,15 @@ public class SimulcastController
          *
          * @param sourceFrameDesc the {@link FrameDesc} that the RTP packet belongs
          * to.
-         * @param buf the <tt>byte</tt> array that holds the packet.
-         * @param off the offset in <tt>buffer</tt> at which the actual data begins.
-         * @param len the number of <tt>byte</tt>s in <tt>buffer</tt> which
-         * constitute the actual data.
+         * @param pkt the packet for which to decide to accept
          * @return <tt>true</tt> to allow the specified packet/<tt>buffer</tt> to be
          * written into the arbitrary target/receiver that owns this
          * {@link BitstreamController} ; otherwise, <tt>false</tt>
          */
         public boolean accept(
-            FrameDesc sourceFrameDesc, byte[] buf, int off, int len)
+            FrameDesc sourceFrameDesc, RawPacket pkt)
         {
-            if (adaptive && sourceFrameDesc.getStart() == -1)
+            if (isAdaptive && !sourceFrameDesc.firstSequenceNumberKnown())
             {
                 return false;
             }
@@ -758,52 +823,35 @@ public class SimulcastController
                 // This can happen when the max frame is a TL0 and we don't know its
                 // boundaries. Then the stream will be broken an we should ask for a
                 // key frame.
-
-                int currentIdx = this.currentIdx;
-
-                if (availableIdx != null && availableIdx.length != 0)
                 {
-                    currentIdx = availableIdx[0];
-                    for (int i = 1; i < availableIdx.length; i++)
-                    {
-                        if (availableIdx[i] <= targetIdx)
-                        {
-                            currentIdx = availableIdx[i];
-                        }
-                        else
-                        {
-                            break;
-                        }
-                    }
-
-                    if (currentIdx != this.currentIdx && logger.isDebugEnabled())
+                    int newCurrentIdx = findMaximumQualityIndex(availableQualityIndices, targetIdx);
+                    if (newCurrentIdx != this.currentIdx && logger.isDebugEnabled())
                     {
                         logger.debug("current_idx_changed,hash="
                             + SimulcastController.this.hashCode()
                             + " old_idx=" + this.currentIdx
-                            + ",new_idx=" + currentIdx);
+                            + ",new_idx=" + newCurrentIdx);
                     }
-
-                    this.currentIdx = currentIdx;
+                    this.currentIdx = newCurrentIdx;
                 }
 
-                boolean isNewest = maxSentFrame == null
-                    || TimeUtils.rtpDiff(srcTs, maxSentFrame.srcTs) > 0;
+                boolean isNewerThanMostRecentFrame = !haveSentFrame()
+                    || RTPUtils.isNewerTimestampThan(srcTs, mostRecentSentFrame.srcTs);
 
-                boolean isNewerThanMostRecentKeyFrame = mrKeyFrame == null
-                    || TimeUtils.rtpDiff(srcTs, mrKeyFrame.srcTs) > 0;
+                boolean isNewerThanMostRecentKeyFrame = !haveSentKeyFrame()
+                    || RTPUtils.isNewerTimestampThan(srcTs, mostRecentSentKeyFrame.srcTs);
 
-                if (currentIdx > -1
+                if (!isSuspended()
                     // we haven't seen anything yet and this is an independent
                     // frame.
-                    && (maxSentFrame == null && sourceFrameDesc.isIndependent()
+                    && (!haveSentFrame() && sourceFrameDesc.isIndependent()
                     // frames from non-adaptive streams need to be newer than
                     // the most recent independent frame
-                    || (maxSentFrame != null && !adaptive
+                    || (haveSentFrame() && !isAdaptive
                         && isNewerThanMostRecentKeyFrame)
                     // frames from adaptive streams need to be newer than the
                     // max
-                    || (maxSentFrame != null && adaptive && isNewest)))
+                    || (haveSentFrame() && isAdaptive && isNewerThanMostRecentFrame)))
                 {
                     // the stream is not suspended and we're not dealing with a
                     // late frame or the stream is not adaptive.
@@ -814,14 +862,14 @@ public class SimulcastController
                     // TODO ask for independent frame if we're skipping a TL0.
 
                     int sourceIdx = sourceFrameDesc.getRTPEncoding().getIndex();
-                    if (sourceEncodings[currentIdx].requires(sourceIdx))
+                    if (sourceEncodings[this.currentIdx].requires(sourceIdx))
                     {
                         // the quality of the frame is a dependency of the
                         // forwarded quality and the max frame is effectively
                         // complete.
 
                         SeqNumTranslation seqNumTranslation;
-                        if (maxSentFrame == null || adaptive)
+                        if (!haveSentFrame() || isAdaptive)
                         {
                             int maxSeqNum = getMaxSeqNum();
                             if (maxSeqNum > -1)
@@ -843,12 +891,12 @@ public class SimulcastController
                             // quality, then we're not filtering anything thus
                             // the sequence number distances between the frames
                             // are fixed so we can reuse the sequence number
-                            // translation from the maxSentFrame.
-                            seqNumTranslation = maxSentFrame.seqNumTranslation;
+                            // translation from the mostRecentSentFrame.
+                            seqNumTranslation = mostRecentSentFrame.seqNumTranslation;
                         }
 
                         TimestampTranslation tsTranslation;
-                        if (maxSentFrame == null)
+                        if (!haveSentFrame())
                         {
                             if (tsOff > -1)
                             {
@@ -866,7 +914,7 @@ public class SimulcastController
                             // The timestamp delta doesn't change for a bitstream,
                             // so, if we've sent out a frame already, reuse its
                             // timestamp translation.
-                            tsTranslation = maxSentFrame.tsTranslation;
+                            tsTranslation = mostRecentSentFrame.tsTranslation;
                         }
 
                         int dstPictureID = -1, dstTL0PICIDX = -1;
@@ -875,40 +923,16 @@ public class SimulcastController
                             byte vp8PT = bitrateController.getVideoChannel()
                                 .getStream().getDynamicRTPPayloadType(Constants.VP8);
 
-                            boolean isVP8 = vp8PT
-                                == (byte) RawPacket.getPayloadType(buf, off, len);
+                            boolean isVP8 = vp8PT == pkt.getPayloadType();
 
                             if (isVP8)
                             {
-                                REDBlock redBlock = ((MediaStreamImpl)
-                                    bitrateController.getVideoChannel()
-                                        .getStream()).getPayloadBlock(
-                                            buf, off, len);
-
-                                int srcPID = DePacketizer
-                                    .VP8PayloadDescriptor.getPictureId(
-                                        redBlock.getBuffer(),
-                                        redBlock.getOffset());
-
-                                if (pidDelta == -1)
-                                {
-                                    pidDelta = (pidOff + 1 - srcPID) & 0x7FFF;
-                                }
-
-                                dstPictureID = (srcPID + pidDelta) & 0x7FFF;
-
-                                if (((dstPictureID - getMaxPictureID()) & 0x7FFF) > 200
-                                    || ((dstPictureID - getMaxPictureID()) & 0x7FFF) > 0x7F00)
-                                {
-                                    pidDelta = (getMaxPictureID() + 1 - srcPID) & 0x7FFF;
-                                    dstPictureID = (srcPID + pidDelta) & 0x7FFF;
-                                    logger.warn("A jump was detected in the picture IDs.");
-                                }
+                                dstPictureID = calculatePictureID(pkt);
                             }
 
                             int tid = ((MediaStreamImpl) bitrateController
                                 .getVideoChannel().getStream())
-                                .getTemporalID(buf, off, len);
+                                .getTemporalID(pkt);
 
                             if (tid > -1)
                             {
@@ -923,18 +947,18 @@ public class SimulcastController
 
                         destFrame = seenFrameAllocator.getOrCreate();
                         destFrame.reset(srcTs, seqNumTranslation, tsTranslation,
-                            dstPictureID, dstTL0PICIDX);
+                            dstPictureID, dstTL0PICIDX, sourceFrameDesc.isIndependent());
                         seenFrames.put(srcTs, destFrame);
 
-                        if (isNewest)
+                        if (isNewerThanMostRecentFrame)
                         {
-                            maxSentFrame = destFrame;
+                            mostRecentSentFrame = destFrame;
                         }
 
                         if (isNewerThanMostRecentKeyFrame
                             && sourceFrameDesc.isIndependent())
                         {
-                            mrKeyFrame = destFrame;
+                            mostRecentSentKeyFrame = destFrame;
                         }
                     }
                     else
@@ -954,15 +978,59 @@ public class SimulcastController
                 }
             }
 
-            boolean accept = destFrame.accept(sourceFrameDesc, buf, off, len);
+            boolean accept = destFrame.accept(sourceFrameDesc, pkt);
 
             if (accept)
             {
                 transmittedPackets++;
-                transmittedBytes += len;
+                transmittedBytes += pkt.getLength();
             }
 
             return accept;
+        }
+
+        /**
+         * Calculates the destination picture ID of an incoming VP8 frame.
+         *
+         * @param pkt the packet from which to calculate the vp8 picture id
+         * @return the destination picture ID of the VP8 frame that is specified
+         * in the parameter.
+         * FIXME(brian): feels like this should be in some vp8-specific class
+         */
+        private int calculatePictureID(RawPacket pkt)
+        {
+            REDBlock redBlock = bitrateController.getVideoChannel()
+                    .getStream().getPrimaryREDBlock(pkt);
+
+            int srcPID = DePacketizer
+                .VP8PayloadDescriptor.getPictureId(
+                    redBlock.getBuffer(),
+                    redBlock.getOffset());
+
+            int dstPictureID;
+            if (srcPID > -1)
+            {
+                if (pidDelta == -1)
+                {
+                    pidDelta = (pidOff + 1 - srcPID) & 0x7FFF;
+                }
+
+                dstPictureID = (srcPID + pidDelta) & 0x7FFF;
+
+                if (((dstPictureID - getMaxPictureID()) & 0x7FFF) > 200
+                    || ((dstPictureID - getMaxPictureID()) & 0x7FFF) > 0x7F00)
+                {
+                    pidDelta = (getMaxPictureID() + 1 - srcPID) & 0x7FFF;
+                    dstPictureID = (srcPID + pidDelta) & 0x7FFF;
+                    logger.warn("A jump was detected in the picture IDs.");
+                }
+            }
+            else
+            {
+                dstPictureID = -1;
+            }
+
+            return dstPictureID;
         }
 
         /**
@@ -1022,7 +1090,7 @@ public class SimulcastController
          */
         RawPacket[] rtpTransform(RawPacket pktIn)
         {
-            if (pktIn.getSSRCAsLong() != tl0SSRC)
+            if (pktIn.getSSRCAsLong() != tl0Ssrc)
             {
                 return null;
             }
@@ -1042,13 +1110,16 @@ public class SimulcastController
          */
         void rtcpTransform(ByteArrayBuffer baf)
         {
-            SeenFrame maxSentFrame = this.maxSentFrame;
-
+            // Make a local reference to this.maxSentFrame to prevent
+            // it from being set to null or a different frame while we're
+            // using it.  maxSentFrame.tsTranslation is conceptually final for
+            // this given frame, so we don't need any extra protection
+            SeenFrame localMaxSentFrameCopy = this.mostRecentSentFrame;
             // Rewrite timestamp.
-            if (maxSentFrame != null && maxSentFrame.tsTranslation != null)
+            if (localMaxSentFrameCopy != null && localMaxSentFrameCopy.tsTranslation != null)
             {
                 long srcTs = RTCPSenderInfoUtils.getTimestamp(baf);
-                long dstTs = maxSentFrame.tsTranslation.apply(srcTs);
+                long dstTs = localMaxSentFrameCopy.tsTranslation.apply(srcTs);
 
                 if (srcTs != dstTs)
                 {
@@ -1066,7 +1137,7 @@ public class SimulcastController
          */
         private int getMaxSeqNum()
         {
-            return maxSentFrame == null ? seqNumOff : maxSentFrame.getMaxSeqNum();
+            return haveSentFrame() ? mostRecentSentFrame.getMaxSeqNum() : seqNumOff;
         }
 
         /**
@@ -1074,7 +1145,7 @@ public class SimulcastController
          */
         private int getMaxPictureID()
         {
-            return maxSentFrame == null ? pidOff : maxSentFrame.dstPictureID;
+            return haveSentFrame() ? mostRecentSentFrame.dstPictureID : pidOff;
         }
 
         /**
@@ -1082,7 +1153,7 @@ public class SimulcastController
          */
         private long getMaxTs()
         {
-            return maxSentFrame == null ? tsOff : maxSentFrame.getTs();
+            return haveSentFrame() ? mostRecentSentFrame.getTs() : tsOff;
         }
 
         /**
@@ -1094,7 +1165,41 @@ public class SimulcastController
          */
         long getTL0SSRC()
         {
-            return tl0SSRC;
+            return tl0Ssrc;
+        }
+
+        /**
+         * Return whether or not this BitstreamController has sent a frame
+         * from the current bitstream yet
+         *
+         * @return true if it has sent a frame from this bitstream, false
+         * otherwise
+         */
+        private boolean haveSentFrame()
+        {
+            return mostRecentSentFrame != null;
+        }
+
+        /**
+         * Return whether or not this BitstreamController has sent a key frame
+         * from the current bitstream yet
+         *
+         * @return true if it has sent a key frame from this bitstream, false
+         * otherwise
+         */
+        private boolean haveSentKeyFrame()
+        {
+            return mostRecentSentKeyFrame != null;
+        }
+
+        /**
+         * Returns whether or not this bitstream is suspended
+         *
+         * @return true if this bitstream is suspended, false otherwise
+         */
+        private boolean isSuspended()
+        {
+            return currentIdx == -1;
         }
 
         /**
@@ -1132,6 +1237,7 @@ public class SimulcastController
             /**
              * The VP8 TL0PICIDX to set to outgoing packets that belong to this
              * frame.
+             * https://tools.ietf.org/html/rfc7741#section-4.2
              */
             private int dstTL0PICIDX = -1;
 
@@ -1152,19 +1258,16 @@ public class SimulcastController
              *
              * @param source the {@link FrameDesc} that the RTP packet belongs
              * to.
-             * @param buf the <tt>byte</tt> array that holds the packet.
-             * @param off the offset in <tt>buffer</tt> at which the actual data
-             * begins.
-             * @param len the number of <tt>byte</tt>s in <tt>buffer</tt> which
-             * constitute the actual data.
+             * @param pkt the packet for which to decide to accept
              * @return <tt>true</tt> to allow the specified packet/<tt>buffer</tt>
              * to be written into the arbitrary target/receiver that owns this
              * {@link SeenFrame} ; otherwise, <tt>false</tt>
              */
-            boolean accept(FrameDesc source, byte[] buf, int off, int len)
+            boolean accept(FrameDesc source, RawPacket pkt)
             {
-                if (this == maxSentFrame /* the max frame can expand */
-                    || availableIdx == null || availableIdx.length < 2)
+                if (this == mostRecentSentFrame /* the max frame can expand */
+                    || availableQualityIndices == null
+                    || availableQualityIndices.length < 2)
                 {
                     int end = source.getEnd();
                     srcSeqNumLimit
@@ -1180,10 +1283,18 @@ public class SimulcastController
                 srcSeqNumStart
                     = start != -1 ? source.getStart() : source.getMinSeen();
 
-                int seqNum = RawPacket.getSequenceNumber(buf, off, len);
+                int seqNum = pkt.getSequenceNumber();
 
-                boolean accept
-                    = RTPUtils.sequenceNumberDiff(seqNum, srcSeqNumLimit) <= 0;
+                // We'll accept the packet if it's no newer than our srcSeqNumLimit
+                // FIXME(brian): in what scenario will this test fail?  mostRecentSentFrame
+                // will always, at least, be equal to the frame to which this
+                // sequence number belongs, and we update srcSeqNumLimit based
+                // on the highest seen sequence number of that frame.  if seqNum
+                // was from a new frame
+                boolean accept =
+                    RTPUtils.isOlderSequenceNumberThan(
+                        seqNum,
+                        RTPUtils.applySequenceNumberDelta(srcSeqNumLimit, 1));
 
                 if (!accept && logger.isDebugEnabled())
                 {
@@ -1193,6 +1304,82 @@ public class SimulcastController
                 }
 
                 return accept;
+            }
+
+            /**
+             * Rewrite the vp8 picture id
+             * @param pktOut the packet in which to rewrite the picture id
+             * @return a RawPacket matching the given one in all ways but
+             * with the picture id appropriately rewritten (may not be the same
+             * RawPacket instance as pktOut)
+             */
+            private RawPacket handleVp8PictureIdRewriting(RawPacket pktOut)
+            {
+                MediaStreamTrackDesc source = weakSource.get();
+                assert source != null;
+
+                REDBlock redBlock = source.getMediaStreamTrackReceiver()
+                    .getStream().getPrimaryREDBlock(pktOut);
+
+                if (!DePacketizer
+                    .VP8PayloadDescriptor.hasExtendedPictureId(
+                        redBlock.getBuffer(), redBlock.getOffset(),
+                        redBlock.getLength()))
+                {
+                    // XXX we have observed that using a non-extended
+                    // picture ID makes the Chrome 58 jitter buffer to
+                    // completely freak out. So here we expand the non
+                    // extended picture id field and convert it to an
+                    // extended one.
+                    byte[] srcBuf = pktOut.getBuffer();
+                    byte[] dstBuf = new byte[srcBuf.length + 1];
+                    System.arraycopy(
+                        srcBuf, 0, dstBuf, 0, redBlock.getOffset() + 3);
+                    System.arraycopy(srcBuf, redBlock.getOffset() + 3,
+                        dstBuf, redBlock.getOffset() + 4,
+                        srcBuf.length - redBlock.getOffset() - 3);
+
+                    // set the extended picture id bit.
+                    dstBuf[redBlock.getOffset() + 2] |= (byte) (0x80);
+
+                    pktOut = new RawPacket(dstBuf,
+                        pktOut.getOffset(), pktOut.getLength() + 1);
+
+                    logger.debug("Extending the picture ID of a VP8 pkt.");
+                }
+
+                if (!DePacketizer
+                    .VP8PayloadDescriptor.setExtendedPictureId(
+                        // XXX pktOut is not a typo.
+                        pktOut.getBuffer(), redBlock.getOffset(),
+                        redBlock.getLength(), dstPictureID))
+                {
+                    logger.warn("Failed to set the VP8 extended" +
+                        " picture ID.");
+                }
+                // We may have re-assigned pktOut to a new RawPacket
+                return pktOut;
+            }
+
+            /**
+             * Handles setting the appropriate TL0PICIDX on the given packet
+             * @param pktOut the packet in which to set the TL0PICIDX (in place)
+             *
+             */
+            private void handleSettingVp8TL0PICIDX(RawPacket pktOut)
+            {
+                MediaStreamTrackDesc source = weakSource.get();
+                assert source != null;
+
+                REDBlock redBlock = source.getMediaStreamTrackReceiver()
+                    .getStream().getPrimaryREDBlock(pktOut);
+
+                if (!DePacketizer.VP8PayloadDescriptor.setTL0PICIDX(
+                    redBlock.getBuffer(), redBlock.getOffset(),
+                    redBlock.getLength(), dstTL0PICIDX))
+                {
+                    logger.warn("Failed to set the VP8 TL0PICIDX.");
+                }
             }
 
             /**
@@ -1207,7 +1394,7 @@ public class SimulcastController
             RawPacket[] rtpTransform(RawPacket pktIn)
             {
                 RawPacket[] pktsOut;
-                long srcSSRC = pktIn.getSSRCAsLong();
+                long srcSsrc = pktIn.getSSRCAsLong();
 
                 if (maybeFixInitialIndependentFrame)
                 {
@@ -1224,14 +1411,14 @@ public class SimulcastController
                             .getCachingTransformer()
                             .getIncomingRawPacketCache();
 
-                        int len = RTPUtils.sequenceNumberDiff(
+                        int len = RTPUtils.getSequenceNumberDelta(
                             srcSeqNumLimit, srcSeqNumStart) + 1;
                         pktsOut = new RawPacket[len];
                         for (int i = 0; i < pktsOut.length; i++)
                         {
                             // Note that the ingress cache might not have the desired
                             // packet.
-                            pktsOut[i] = inCache.get(srcSSRC, (srcSeqNumStart + i) & 0xFFFF);
+                            pktsOut[i] = inCache.get(srcSsrc, (srcSeqNumStart + i) & 0xFFFF);
                         }
                     }
                     else
@@ -1277,71 +1464,12 @@ public class SimulcastController
 
                     if (ENABLE_VP8_PICID_REWRITING && dstPictureID > -1)
                     {
-                        MediaStreamTrackDesc source = weakSource.get();
-                        assert source != null;
-
-                        REDBlock redBlock = source.getMediaStreamTrackReceiver()
-                            .getStream().getPayloadBlock(
-                                pktOut.getBuffer(),
-                                pktOut.getOffset(),
-                                pktOut.getLength());
-
-                        if (!DePacketizer
-                            .VP8PayloadDescriptor.hasExtendedPictureId(
-                            redBlock.getBuffer(), redBlock.getOffset(),
-                            redBlock.getLength()))
-                        {
-                            // XXX we have observed that using a non-extended
-                            // picture ID makes the Chrome 58 jitter buffer to
-                            // completely freak out. So here we expand the non
-                            // extended picture id field and convert it to an
-                            // extended one.
-                            byte[] srcBuf = pktOut.getBuffer();
-                            byte[] dstBuf = new byte[srcBuf.length + 1];
-                            System.arraycopy(
-                                srcBuf, 0, dstBuf, 0, redBlock.getOffset() + 3);
-                            System.arraycopy(srcBuf, redBlock.getOffset() + 3,
-                                dstBuf, redBlock.getOffset() + 4,
-                                srcBuf.length - redBlock.getOffset() - 3);
-
-                            // set the extended picture id bit.
-                            dstBuf[redBlock.getOffset() + 2] |= (byte) (0x80);
-
-                            pktOut = new RawPacket(dstBuf,
-                                pktOut.getOffset(), pktOut.getLength() + 1);
-                            pktsOut[i] = pktOut;
-
-                            logger.debug("Extending the picture ID of a VP8 pkt.");
-                        }
-
-                        if (!DePacketizer
-                            .VP8PayloadDescriptor.setExtendedPictureId(
-                                // XXX pktOut is not a typo.
-                            pktOut.getBuffer(), redBlock.getOffset(),
-                            redBlock.getLength(), dstPictureID))
-                        {
-                            logger.warn("Failed to set the VP8 extended" +
-                                " picture ID.");
-                        }
+                        pktsOut[i] = handleVp8PictureIdRewriting(pktOut);
                     }
 
                     if (dstTL0PICIDX > -1)
                     {
-                        MediaStreamTrackDesc source = weakSource.get();
-                        assert source != null;
-
-                        REDBlock redBlock = source.getMediaStreamTrackReceiver()
-                            .getStream().getPayloadBlock(
-                                pktOut.getBuffer(),
-                                pktOut.getOffset(),
-                                pktOut.getLength());
-
-                        if (!DePacketizer.VP8PayloadDescriptor.setTL0PICIDX(
-                            redBlock.getBuffer(), redBlock.getOffset(),
-                            redBlock.getLength(), dstTL0PICIDX))
-                        {
-                            logger.warn("Failed to set the VP8 TL0PICIDX.");
-                        }
+                        handleSettingVp8TL0PICIDX(pktOut);
                     }
                 }
                 return pktsOut;
@@ -1382,13 +1510,14 @@ public class SimulcastController
              * @param dstTL0PICIDX The VP8 TL0PICIDX to set to outgoing packets
              * that belong to this frame.
              */
-            public void reset(
+            void reset(
                 long srcTs,
                 SeqNumTranslation seqNumTranslation,
                 TimestampTranslation tsTranslation,
-                int dstPictureID, int dstTL0PICIDX)
+                int dstPictureID, int dstTL0PICIDX,
+                boolean maybeFixInitialIndependentFrame)
             {
-                this.maybeFixInitialIndependentFrame = true;
+                this.maybeFixInitialIndependentFrame = maybeFixInitialIndependentFrame;
                 this.srcSeqNumLimit = -1;
                 this.srcSeqNumStart = -1;
                 this.srcTs = srcTs;
@@ -1405,7 +1534,7 @@ public class SimulcastController
              */
             void reset(long srcTs)
             {
-                reset(srcTs, null, null, -1, -1);
+                reset(srcTs, null, null, -1, -1, false);
             }
         }
 
@@ -1426,17 +1555,17 @@ public class SimulcastController
              * @return a {@link SeenFrame} from the pool of available seen
              * frames, or a new one, if none is available.
              */
-            public SeenFrame getOrCreate()
+            SeenFrame getOrCreate()
             {
                 return pool.isEmpty() ? new SeenFrame() : pool.remove();
             }
 
             /**
              * Returns a {@link SeenFrame} to this allocator.
-             * 
+             *
              * @param value the {@link SeenFrame} to return.
              */
-            public void returnSeenFrame(SeenFrame value)
+            void returnSeenFrame(SeenFrame value)
             {
                 pool.add(value);
             }

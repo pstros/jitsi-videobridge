@@ -92,6 +92,11 @@ public class Endpoint
     private String displayName;
 
     /**
+     * The statistic Id of this <tt>Endpoint</tt>.
+     */
+    private String statsId;
+
+    /**
      * The indicator which determines whether {@link #expire()} has been called
      * on this <tt>Endpoint</tt>.
      */
@@ -262,6 +267,14 @@ public class Endpoint
     }
 
     /**
+     * @return a list with all {@link RtpChannel}s of this {@link Endpoint}.
+     */
+    public List<RtpChannel> getChannels()
+    {
+        return getChannels(null);
+    }
+
+    /**
      * Gets a list with the {@link RtpChannel}s of this {@link Endpoint} with a
      * particular {@link MediaType} (or all of them, if {@code mediaType} is
      * {@code null}).
@@ -311,6 +324,16 @@ public class Endpoint
     public String getDisplayName()
     {
         return displayName;
+    }
+
+    /**
+     * Returns the stats Id of this <tt>Endpoint</tt>.
+     *
+     * @return the stats Id of this <tt>Endpoint</tt>.
+     */
+    public String getStatsId()
+    {
+        return statsId;
     }
 
     /**
@@ -391,6 +414,12 @@ public class Endpoint
         {
             this.pinnedEndpoints = newPinnedEndpoints;
 
+            if (logger.isDebugEnabled())
+            {
+                logger.debug(id + " pinned "
+                    + Arrays.toString(pinnedEndpoints.toArray()));
+            }
+
             firePropertyChange(PINNED_ENDPOINTS_PROPERTY_NAME,
                 oldPinnedEndpoints, pinnedEndpoints);
         }
@@ -403,6 +432,12 @@ public class Endpoint
         if (!oldSelectedEndpoints.equals(newSelectedEndpoints))
         {
             this.selectedEndpoints = newSelectedEndpoints;
+
+            if (logger.isDebugEnabled())
+            {
+                logger.debug(id + " selected "
+                    + Arrays.toString(pinnedEndpoints.toArray()));
+            }
 
             firePropertyChange(SELECTED_ENDPOINTS_PROPERTY_NAME,
                 oldSelectedEndpoints, selectedEndpoints);
@@ -431,27 +466,24 @@ public class Endpoint
     public boolean removeChannel(RtpChannel channel)
     {
         if (channel == null)
+        {
             return false;
+        }
 
-        boolean removed = false;
+        boolean removed;
 
         synchronized (channels)
         {
-            for (Iterator<WeakReference<RtpChannel>> i = channels.iterator();
-                    i.hasNext();)
-            {
-                Channel c = i.next().get();
-
-                if ((c == null) || c.equals(channel) || c.isExpired())
-                {
-                    i.remove();
-                    removed = true;
-                }
-            }
+            removed = channels.removeIf(w -> {
+                Channel c = w.get();
+                return c == null || c.equals(channel) || c.isExpired();
+            });
         }
 
         if (removed)
+        {
             firePropertyChange(CHANNELS_PROPERTY_NAME, null, null);
+        }
 
         return removed;
     }
@@ -470,15 +502,14 @@ public class Endpoint
                 && !sctpConnection.isExpired()
                 && sctpConnection.isReady())
         {
-            for (RtpChannel channel : getChannels(null))
-                channel.sctpConnectionReady(this);
-
             WebRtcDataStream dataStream;
 
             try
             {
                 dataStream = sctpConnection.getDefaultDataStream();
                 dataStream.setDataCallback(this);
+
+                messageTransport.notifyTransportChannelConnected();
             }
             catch (IOException e)
             {
@@ -508,6 +539,16 @@ public class Endpoint
     public void setDisplayName(String displayName)
     {
         this.displayName = displayName;
+    }
+
+    /**
+     * Sets the stats Id of this <tt>Endpoint</tt>.
+     *
+     * @param value the stats Id value to set on this <tt>Endpoint</tt>.
+     */
+    public void setStatsId(String value)
+    {
+        this.statsId = value;
     }
 
     /**
@@ -603,7 +644,7 @@ public class Endpoint
     /**
      * Checks whether a WebSocket connection with a specific password string
      * should be accepted for this {@link Endpoint}.
-     * @param icePassword the
+     * @param password the
      * @return {@code true} iff the password matches and the WebSocket
      */
     public boolean acceptWebSocket(String password)

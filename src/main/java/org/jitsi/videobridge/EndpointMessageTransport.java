@@ -15,6 +15,7 @@
  */
 package org.jitsi.videobridge;
 
+import org.jitsi.eventadmin.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.util.*;
 import org.jitsi.videobridge.rest.*;
@@ -84,6 +85,13 @@ class EndpointMessageTransport
         = "EndpointMessage";
 
     /**
+     * The {@link Videobridge#COLIBRI_CLASS} value indicating a
+     * {@code ReceiverVideoConstraint} message.
+     */
+    public static final String COLIBRI_CLASS_RECEIVER_VIDEO_CONSTRAINT
+        = "ReceiverVideoConstraint";
+
+    /**
      * The string which encodes a COLIBRI {@code ServerHello} message.
      */
     private static final String SERVER_HELLO_STR
@@ -136,6 +144,25 @@ class EndpointMessageTransport
         this.logger
             = Logger.getLogger(
                     classLogger, endpoint.getConference().getLogger());
+    }
+
+    /**
+     * Fires the message transport ready event for the associated endpoint.
+     */
+    void notifyTransportChannelConnected()
+    {
+        EventAdmin eventAdmin = endpoint.getConference().getEventAdmin();
+
+        if (eventAdmin != null)
+        {
+            eventAdmin.postEvent(
+                EventFactory.endpointMessageTransportReady(endpoint));
+        }
+
+        for (RtpChannel channel : endpoint.getChannels())
+        {
+            channel.endpointMessageTransportConnected();
+        }
     }
 
     /**
@@ -222,19 +249,12 @@ class EndpointMessageTransport
     private void sendMessage(
         ColibriWebSocket dst, String message, String errorMessage)
     {
-        try
-        {
-            dst.getRemote().sendString(message);
-            endpoint.getConference().getVideobridge().getStatistics()
-                .totalColibriWebSocketMessagesSent.incrementAndGet();
-        }
-        catch (IOException ioe)
-        {
-            logger.error(
-                "Failed to send a message over a WebSocket (endpoint="
-                    + endpoint.getID() + "): " + errorMessage,
-                ioe);
-        }
+        // We'll use the async version of sendString since this may be called
+        // from multiple threads.  It's just fire-and-forget though, so we
+        // don't wait on the result
+        dst.getRemote().sendStringByFuture(message);
+        endpoint.getConference().getVideobridge().getStatistics()
+            .totalColibriWebSocketMessagesSent.incrementAndGet();
     }
 
     /**
@@ -275,6 +295,9 @@ class EndpointMessageTransport
             break;
         case COLIBRI_CLASS_LASTN_CHANGED:
             onLastNChangedEvent(src, jsonObject);
+            break;
+        case COLIBRI_CLASS_RECEIVER_VIDEO_CONSTRAINT:
+            onReceiverVideoConstraintEvent(src, jsonObject);
             break;
         default:
             break;
@@ -519,6 +542,36 @@ class EndpointMessageTransport
     }
 
     /**
+     * Notifies this {@code Endpoint} that a {@code ReceiverVideoConstraint}
+     * event has been received
+     *
+     * @param src the transport channel by which {@code jsonObject} has been
+     * received.
+     * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
+     * {@code LastNChangedEvent} which has been received.
+     */
+    private void onReceiverVideoConstraintEvent(
+        Object src,
+        JSONObject jsonObject)
+    {
+        Object o = jsonObject.get("maxFrameHeight");
+        if (!(o instanceof Number))
+        {
+            logger.warn("Received a non-number maxFrameHeight video constraint from " + endpoint.getID() +
+                ": " + o.toString());
+            return;
+        }
+        int maxFrameHeight = ((Number) o).intValue();
+        logger.debug("Received a maxFrameHeight video constraint from " + endpoint.getID() + ": " + maxFrameHeight);
+
+        for (RtpChannel channel : endpoint.getChannels(MediaType.VIDEO))
+        {
+            VideoChannel videoChannel = (VideoChannel)channel;
+            videoChannel.setMaxFrameHeight(maxFrameHeight);
+        }
+    }
+
+    /**
      * {@inheritDoc}
      */
     @Override
@@ -672,6 +725,8 @@ class EndpointMessageTransport
             webSocketLastActive = true;
             sendMessage(ws, SERVER_HELLO_STR, "initial ServerHello");
         }
+
+        notifyTransportChannelConnected();
     }
 
     /**

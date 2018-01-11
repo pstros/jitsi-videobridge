@@ -341,17 +341,14 @@ public class BitrateController
      * Defines a packet filter that controls which RTP packets to be written
      * into the {@link Channel} that owns this {@link BitrateController}.
      *
-     * @param buf the <tt>byte</tt> array that holds the packet.
-     * @param off the offset in <tt>buffer</tt> at which the actual data begins.
-     * @param len the number of <tt>byte</tt>s in <tt>buffer</tt> which
-     * constitute the actual data.
-     * @return <tt>true</tt> to allow the specified packet/<tt>buffer</tt> to be
+     * @param pkt that packet for which to decide to accept
+     * @return <tt>true</tt> to allow the specified packet to be
      * written into the {@link Channel} that owns this {@link BitrateController}
      * ; otherwise, <tt>false</tt>
      */
-    public boolean accept(byte[] buf, int off, int len)
+    public boolean accept(RawPacket pkt)
     {
-        long ssrc = RawPacket.getSSRCAsLong(buf, off, len);
+        long ssrc = pkt.getSSRCAsLong();
         if (ssrc < 0)
         {
             return false;
@@ -361,7 +358,7 @@ public class BitrateController
             = ssrcToBitrateController.get(ssrc);
 
         return simulcastController != null
-            && simulcastController.accept(buf, off, len);
+            && simulcastController.accept(pkt);
     }
 
     /**
@@ -405,6 +402,11 @@ public class BitrateController
         {
             // Create a copy as we may modify the list in the prioritize method.
             conferenceEndpoints = new ArrayList<>(conferenceEndpoints);
+        }
+
+        if (!(dest.getStream() instanceof VideoMediaStreamImpl))
+        {
+            return;
         }
 
         VideoMediaStreamImpl destStream
@@ -473,20 +475,23 @@ public class BitrateController
                         RTPEncodingDesc[] rtpEncodings
                             = trackBitrateAllocation.track.getRTPEncodings();
 
-                        ctrl = new SimulcastController(
-                            this, trackBitrateAllocation.track);
-
-                        // Route all encodings to the specified bitrate
-                        // controller.
-                        for (RTPEncodingDesc rtpEncoding : rtpEncodings)
+                        if (!ArrayUtils.isNullOrEmpty(rtpEncodings))
                         {
-                            ssrcToBitrateController.put(
-                                rtpEncoding.getPrimarySSRC(), ctrl);
+                            ctrl = new SimulcastController(
+                                this, trackBitrateAllocation.track);
 
-                            if (rtpEncoding.getRTXSSRC() != -1)
+                            // Route all encodings to the specified bitrate
+                            // controller.
+                            for (RTPEncodingDesc rtpEncoding : rtpEncodings)
                             {
                                 ssrcToBitrateController.put(
-                                    rtpEncoding.getRTXSSRC(), ctrl);
+                                    rtpEncoding.getPrimarySSRC(), ctrl);
+
+                                if (rtpEncoding.getRTXSSRC() != -1)
+                                {
+                                    ssrcToBitrateController.put(
+                                        rtpEncoding.getRTXSSRC(), ctrl);
+                                }
                             }
                         }
                     }
@@ -498,12 +503,13 @@ public class BitrateController
                     ctrl.setTargetIndex(targetIdx);
                     ctrl.setOptimalIndex(optimalIdx);
 
-                    if (logger.isDebugEnabled())
+                    MediaStreamTrackDesc sourceTrack = ctrl.getSource();
+                    if (sourceTrack != null && logger.isDebugEnabled())
                     {
                         logger.debug("qot" +
                             "," + nowMs +
                             "," + destStream.hashCode() +
-                            "," + ctrl.getSource().hashCode() +
+                            "," + sourceTrack.hashCode() +
                             "," + ctrl.getCurrentIndex() +
                             "," + targetIdx +
                             "," + optimalIdx +
@@ -717,7 +723,8 @@ public class BitrateController
                                 sourceEndpoint,
                                 track,
                                 true /* fitsInLastN */,
-                                true /* selected */));
+                                true /* selected */,
+                                getVideoChannel().getMaxFrameHeight()));
                     }
 
                     endpointPriority++;
@@ -754,7 +761,8 @@ public class BitrateController
                                 sourceEndpoint,
                                 track,
                                 true /* fitsInLastN */,
-                                false /* selected */));
+                                false /* selected */,
+                                getVideoChannel().getMaxFrameHeight()));
                     }
 
                     endpointPriority++;
@@ -787,7 +795,8 @@ public class BitrateController
                         trackBitrateAllocations.add(
                             endpointPriority, new TrackBitrateAllocation(
                                 sourceEndpoint, track,
-                                forwarded, false /* selected */));
+                                forwarded, false /* selected */,
+                                getVideoChannel().getMaxFrameHeight()));
                     }
 
                     endpointPriority++;
@@ -869,6 +878,11 @@ public class BitrateController
         private final int targetSSRC;
 
         /**
+         * Maximum frame height, in pixels, for any video stream forwarded to this receiver
+         */
+        private final int maxFrameHeight;
+
+        /**
          * The first {@link MediaStreamTrackDesc} of the {@link Endpoint} that
          * this instance pertains to.
          */
@@ -909,32 +923,40 @@ public class BitrateController
          */
         private TrackBitrateAllocation(
             Endpoint endpoint, MediaStreamTrackDesc track,
-            boolean fitsInLastN, boolean selected)
+            boolean fitsInLastN, boolean selected, int maxFrameHeight)
         {
             this.endpointID = endpoint.getID();
             this.selected = selected;
             this.fitsInLastN = fitsInLastN;
             this.track = track;
+            this.maxFrameHeight = maxFrameHeight;
 
-            if (track == null || !fitsInLastN)
+            RTPEncodingDesc[] encodings;
+            if (track == null)
             {
-                targetSSRC = -1;
+                this.targetSSRC = -1;
+                encodings = null;
+            }
+            else
+            {
+                encodings = track.getRTPEncodings();
+
+                if (ArrayUtils.isNullOrEmpty(encodings))
+                {
+                    this.targetSSRC = -1;
+                }
+                else
+                {
+                    this.targetSSRC = (int) encodings[0].getPrimarySSRC();
+                }
+            }
+
+            if (targetSSRC == -1 || !fitsInLastN)
+            {
                 preferredIdx = -1;
                 rates = EMPTY_RATE_SNAPSHOT_ARRAY;
                 return;
             }
-
-            RTPEncodingDesc[] encodings = track.getRTPEncodings();
-
-            if (ArrayUtils.isNullOrEmpty(encodings))
-            {
-                targetSSRC = -1;
-                preferredIdx = -1;
-                rates = EMPTY_RATE_SNAPSHOT_ARRAY;
-                return;
-            }
-
-            targetSSRC = (int) encodings[0].getPrimarySSRC();
 
             List<RateSnapshot> ratesList = new ArrayList<>();
             // Initialize the list of flows that we will consider for sending
@@ -942,9 +964,13 @@ public class BitrateController
             // consider 720p@30fps, 360p@30fps, 180p@30fps, 180p@15fps,
             // 180p@7.5fps while for the thumbnails we consider 180p@30fps,
             // 180p@15fps and 180p@7.5fps
-            int preferredIdx = -1;
+            int preferredIdx = 0;
             for (RTPEncodingDesc encoding : encodings)
             {
+                if (encoding.getHeight() > this.maxFrameHeight)
+                {
+                    continue;
+                }
                 if (selected)
                 {
                     // For the selected participant we favor resolution over
