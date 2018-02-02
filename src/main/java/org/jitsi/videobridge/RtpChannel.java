@@ -1907,18 +1907,22 @@ public class RtpChannel
             return false;
         }
 
+
+
         setSources(sources); // TODO remove and rely on MSTs.
         setSourceGroups(sourceGroups); // TODO remove and rely on MSTs.
 
         MediaStreamTrackReceiver
             mediaStreamTrackReceiver = stream.getMediaStreamTrackReceiver();
 
+        logger.info("***RC.setRtpEncodingParamters receiver" + mediaStreamTrackReceiver);
+
         if (mediaStreamTrackReceiver != null)
         {
             MediaStreamTrackDesc[] newTracks
                 = MediaStreamTrackFactory.createMediaStreamTracks(
                     mediaStreamTrackReceiver, sources, sourceGroups);
-
+            logger.info("***RC.setRtpEncodingParamters newTracks" + newTracks);
             return mediaStreamTrackReceiver.setMediaStreamTracks(newTracks);
         }
         else

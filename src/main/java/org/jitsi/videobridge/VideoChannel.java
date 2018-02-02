@@ -287,12 +287,19 @@ public class VideoChannel
     {
         boolean changed = super.setRtpEncodingParameters(sources, sourceGroups);
 
+        logger.info("***VC.setRtpEncodingParameters chID: " + getID() + " sources: " + sources);
+        logger.info("***VC.setRtpEncodingParameters chID: " + getID() + " sourceGroups: " + sourceGroups);
+        logger.info("*** VC.setRtpEncodingParameters chID: " + getID() + " changed: " + changed);
+
         if (changed)
         {
             getContent().getChannels().stream()
                 .filter(c -> c != this && c instanceof VideoChannel)
                 .forEach(
-                    c -> ((VideoChannel) c).bitrateController.update(null, -1));
+                    c -> {
+                        logger.info("***VC.setRtpEncodingParameters bcupdate for channel " + c.getID());
+                        ((VideoChannel) c).bitrateController.update(null, -1);
+                    });
         }
 
         return changed;
@@ -358,6 +365,14 @@ public class VideoChannel
         }
 
         return accept;
+    }
+
+    @Override
+    public void setEndpoint(String newEndpointId)
+    {
+        logger.info("***VideoChannel " + getID() + " setEndpoint: " + newEndpointId);
+        super.setEndpoint(newEndpointId);
+        bitrateController.update(null, -1);
     }
 
     /**

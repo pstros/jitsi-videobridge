@@ -454,6 +454,7 @@ public class BitrateController
 
         long nowMs = System.currentTimeMillis();
         List<SimulcastController> simulcastControllers = new ArrayList<>();
+        logger.info("***BC.update: " + destStream.hashCode() + " trackBitrateAllocations: " + trackBitrateAllocations);
         if (!ArrayUtils.isNullOrEmpty(trackBitrateAllocations))
         {
             for (TrackBitrateAllocation
@@ -496,6 +497,12 @@ public class BitrateController
                         }
                     }
                 }
+
+                logger.info("***BC.update ctrl" + ctrl +
+                    "," + destStream.hashCode() +
+                    "," + ctrl.getCurrentIndex() +
+                    "," + targetIdx +
+                    "," + optimalIdx);
 
                 if (ctrl != null)
                 {
@@ -551,6 +558,9 @@ public class BitrateController
                 endpointsEnteringLastNIds,
                 conferenceEndpointIds);
         }
+
+        logger.info("***BC.update: destStream: " + destStream.hashCode()
+            + " old list: " + oldForwardedEndpointIds + " new list: " + newForwardedEndpointIds);
 
         this.forwardedEndpointIds = newForwardedEndpointIds;
     }

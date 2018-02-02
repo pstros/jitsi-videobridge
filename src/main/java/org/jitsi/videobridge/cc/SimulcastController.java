@@ -330,6 +330,13 @@ public class SimulcastController
         int targetTL0Idx
             = sourceEncodings[newTargetIdx].getBaseLayer().getIndex();
 
+        logger.warn("***SimulcastController sourceEncodings " + sourceEncodings
+            + ", currentTL0Idx " + currentTL0Idx
+            + ", targetTL0Idx " + targetTL0Idx);
+
+        MediaStream sourceStream
+            = sourceTrack.getMediaStreamTrackReceiver().getStream();
+
         // Make sure that something is streaming so that a FIR makes sense.
 
         boolean sendFIR;
@@ -347,6 +354,7 @@ public class SimulcastController
                     if (tl0.isActive(true) && tl0.getIndex() > currentTL0Idx)
                     {
                         sendFIR = true;
+                        logger.warn("***SimulcastController targetSsrc: " + getTargetSSRC() + " sending FIR sourceEncodings is active!");
                         break;
                     }
                 }
@@ -355,21 +363,22 @@ public class SimulcastController
         else
         {
             sendFIR = false;
+            logger.warn("***SimulcastController sourceStream " + sourceStream.hashCode() + " not sending FIR for ssrc " + getTargetSSRC() + " sourceEncodings is NOT active!");
         }
 
-        MediaStream sourceStream
-            = sourceTrack.getMediaStreamTrackReceiver().getStream();
+
         if (sendFIR && sourceStream != null)
         {
 
-            if (logger.isTraceEnabled())
-            {
-                logger.trace("send_fir,stream="
+            //if (logger.isTraceEnabled())
+            //{
+                logger.info("send_fir,stream="
                     + sourceStream.hashCode()
+                    + ",stream_name=" + sourceStream.getName()
                     + ",reason=target_changed"
                     + ",current_tl0=" + currentTL0Idx
                     + ",target_tl0=" + targetTL0Idx);
-            }
+            //}
 
             ((RTPTranslatorImpl) sourceStream.getRTPTranslator())
                 .getRtcpFeedbackMessageSender().sendFIR(
