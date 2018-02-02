@@ -297,7 +297,7 @@ public class VideoChannel
                 .filter(c -> c != this && c instanceof VideoChannel)
                 .forEach(
                     c -> {
-                        logger.info("***VC.setRtpEncodingParameters bcupdate for channel " + c.getID());
+                        logger.info("***VC.setRtpEncodingParameters do BC.update for channel " + c.getID());
                         ((VideoChannel) c).bitrateController.update(null, -1);
                     });
         }

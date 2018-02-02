@@ -1915,14 +1915,15 @@ public class RtpChannel
         MediaStreamTrackReceiver
             mediaStreamTrackReceiver = stream.getMediaStreamTrackReceiver();
 
-        logger.info("***RC.setRtpEncodingParamters receiver" + mediaStreamTrackReceiver);
+        logger.info("***RC.setRtpEncodingParamters chID: " + getID() + " receiver: " + mediaStreamTrackReceiver
+            + " sources: " + sources);
 
         if (mediaStreamTrackReceiver != null)
         {
             MediaStreamTrackDesc[] newTracks
                 = MediaStreamTrackFactory.createMediaStreamTracks(
                     mediaStreamTrackReceiver, sources, sourceGroups);
-            logger.info("***RC.setRtpEncodingParamters newTracks" + newTracks);
+            logger.info("***RC.setRtpEncodingParamters chID: " + getID() + " newTracks: " + newTracks);
             return mediaStreamTrackReceiver.setMediaStreamTracks(newTracks);
         }
         else

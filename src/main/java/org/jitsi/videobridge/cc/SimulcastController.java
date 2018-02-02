@@ -226,6 +226,8 @@ public class SimulcastController
             // Update the bitstreamController if it hasn't suspended yet
             if (currentIndex != SUSPENDED_INDEX)
             {
+                logger.info("***suspending forwarding of stream: " + getTargetSSRC());
+                logger.info("***stream was forwarding to : " + weakSource.get().getMediaStreamTrackReceiver().getStream().hashCode());
                 bitstreamController.suspend();
             }
             return false;
@@ -330,7 +332,9 @@ public class SimulcastController
         int targetTL0Idx
             = sourceEncodings[newTargetIdx].getBaseLayer().getIndex();
 
-        logger.warn("***SimulcastController sourceEncodings " + sourceEncodings
+        logger.warn("***SimulcastController sourceEncodings.length " + sourceEncodings.length
+            + ", sourceEncodings[0]" + sourceEncodings[0]
+            + ", sourceEncodings[0].isActive" + sourceEncodings[0].isActive(true)
             + ", currentTL0Idx " + currentTL0Idx
             + ", targetTL0Idx " + targetTL0Idx);
 
@@ -354,7 +358,9 @@ public class SimulcastController
                     if (tl0.isActive(true) && tl0.getIndex() > currentTL0Idx)
                     {
                         sendFIR = true;
-                        logger.warn("***SimulcastController targetSsrc: " + getTargetSSRC() + " sending FIR sourceEncodings is active!");
+                        logger.warn("***SimulcastController targetSsrc: " + getTargetSSRC() +
+                            ", activeIdx: " + tl0.getIndex() +
+                            ", tl0" + tl0 + " sending FIR sourceEncodings is active!");
                         break;
                     }
                 }

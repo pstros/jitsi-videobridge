@@ -454,7 +454,8 @@ public class BitrateController
 
         long nowMs = System.currentTimeMillis();
         List<SimulcastController> simulcastControllers = new ArrayList<>();
-        logger.info("***BC.update: " + destStream.hashCode() + " trackBitrateAllocations: " + trackBitrateAllocations);
+        logger.info("***BC.update: destStream: " + destStream.hashCode()
+            + " isNullOrEmpty(trackBitrateAllocations): " + ArrayUtils.isNullOrEmpty(trackBitrateAllocations));
         if (!ArrayUtils.isNullOrEmpty(trackBitrateAllocations))
         {
             for (TrackBitrateAllocation
@@ -498,11 +499,12 @@ public class BitrateController
                     }
                 }
 
-                logger.info("***BC.update ctrl" + ctrl +
-                    "," + destStream.hashCode() +
-                    "," + ctrl.getCurrentIndex() +
-                    "," + targetIdx +
-                    "," + optimalIdx);
+                logger.info("***BC.update destStream: " + destStream.hashCode() +
+                    ", ctrl? " + (ctrl != null) +
+                    ", targetSsrc: " + ssrc +
+                    ", current: " + ctrl.getCurrentIndex() +
+                    ", target: " + targetIdx +
+                    ", optimal: " + optimalIdx);
 
                 if (ctrl != null)
                 {
