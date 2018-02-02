@@ -1916,7 +1916,7 @@ public class RtpChannel
             mediaStreamTrackReceiver = stream.getMediaStreamTrackReceiver();
 
         logger.info("***RC.setRtpEncodingParamters chID: " + getID() + " receiver: " + mediaStreamTrackReceiver
-            + " sources: " + sources);
+            + " sources.size(): " + sources.size() + " sources: " + sources);
 
         if (mediaStreamTrackReceiver != null)
         {
