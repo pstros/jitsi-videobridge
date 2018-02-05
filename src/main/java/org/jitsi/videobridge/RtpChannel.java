@@ -1050,6 +1050,8 @@ public class RtpChannel
 
             synchronized (streamSyncRoot) // Otherwise, races with stream.setDirection().
             {
+                logger.info("***RtpChannel.mayebStartStream starting stream " + stream.hashCode()
+                    + " ssrc: " + initialLocalSSRC + ", direction: " + stream.getDirection());
                 stream.start();
             }
 

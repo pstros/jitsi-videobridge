@@ -287,9 +287,9 @@ public class VideoChannel
     {
         boolean changed = super.setRtpEncodingParameters(sources, sourceGroups);
 
-        logger.info("***VC.setRtpEncodingParameters chID: " + getID() + " sources: " + sources);
-        logger.info("***VC.setRtpEncodingParameters chID: " + getID() + " sourceGroups: " + sourceGroups);
-        logger.info("*** VC.setRtpEncodingParameters chID: " + getID() + " changed: " + changed);
+        logger.info("***VC.setRtpEncodingParameters stream: " + getStream().hashCode() + " sources: " + sources);
+        logger.info("***VC.setRtpEncodingParameters stream: " + getStream().hashCode() + " sourceGroups: " + sourceGroups);
+        logger.info("*** VC.setRtpEncodingParameters stream: " + getStream().hashCode() + " changed: " + changed);
 
         if (changed)
         {
@@ -297,7 +297,7 @@ public class VideoChannel
                 .filter(c -> c != this && c instanceof VideoChannel)
                 .forEach(
                     c -> {
-                        logger.info("***VC.setRtpEncodingParameters do BC.update for channel " + c.getID());
+                        logger.info("***VC.setRtpEncodingParameters do BC.update for stream " + getStream().hashCode());
                         ((VideoChannel) c).bitrateController.update(null, -1);
                     });
         }
@@ -355,6 +355,7 @@ public class VideoChannel
 
         if (accept)
         {
+            logger.info("***VideoChannel.acceptDataInput... stream: " + getStream().hashCode() + " packet: " + p);
             // TODO: find a way to do this only in case it is actually needed
             // (currently this means when there is another channel in the
             // same content, with adaptive-last-n turned on), in order to not

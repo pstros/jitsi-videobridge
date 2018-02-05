@@ -281,6 +281,7 @@ public class SimulcastController
         if (!sourceFrameDesc.isIndependent())
         {
             // If it's not a keyframe we can't switch to it anyway
+            logger.info("***SimulcastController.accept ignoring non-keyframe on ssrc " + pkt.getSSRCAsLong() + ", layer: " + sourceBaseLayerIndex);
             return false;
         }
         int targetBaseLayerIndex = sourceEncodings[targetIndex].getBaseLayer().getIndex();
@@ -290,6 +291,8 @@ public class SimulcastController
             // We do want to switch to another layer
             if (shouldSwitchToBaseLayer(currentBaseLayerIndex, sourceBaseLayerIndex, targetBaseLayerIndex))
             {
+                logger.info("***SimulcastController.accept received packet for ssrc " + pkt.getSSRCAsLong() + ", layer: " + sourceBaseLayerIndex);
+                logger.info("***SimulcastController.accept pt2 " + pkt.getSSRCAsLong() + " isActive: " + sourceEncodings[sourceLayerIndex].getBaseLayer().isActive(true));
                 // This frame represents, at least, a step in the right direction
                 // towards the stream we want
                 bitstreamController.setTL0Idx(sourceBaseLayerIndex);
@@ -332,14 +335,15 @@ public class SimulcastController
         int targetTL0Idx
             = sourceEncodings[newTargetIdx].getBaseLayer().getIndex();
 
-        logger.warn("***SimulcastController sourceEncodings.length " + sourceEncodings.length
-            + ", sourceEncodings[0]" + sourceEncodings[0]
-            + ", sourceEncodings[0].isActive" + sourceEncodings[0].isActive(true)
-            + ", currentTL0Idx " + currentTL0Idx
-            + ", targetTL0Idx " + targetTL0Idx);
-
         MediaStream sourceStream
             = sourceTrack.getMediaStreamTrackReceiver().getStream();
+
+        logger.warn("***SimulcastController stream: " + sourceStream.hashCode()
+            + ", sourceEncodings.length " + sourceEncodings.length
+            + ", sourceEncodings[0] " + sourceEncodings[0]
+            + ", sourceEncodings[0].isActive " + sourceEncodings[0].isActive(true)
+            + ", currentTL0Idx " + currentTL0Idx
+            + ", targetTL0Idx " + targetTL0Idx);
 
         // Make sure that something is streaming so that a FIR makes sense.
 
@@ -986,6 +990,10 @@ public class SimulcastController
                 else
                 {
                     // TODO ask for independent frame if we're filtering a TL0.
+
+                    logger.info("***SC.BitstreamController.accept no keyframe yet on stream " + sourceFrameDesc
+                        .getRTPEncoding().getMediaStreamTrack().hashCode()
+                        + ", layer: " + sourceFrameDesc.getRTPEncoding().getIndex());
 
                     destFrame = seenFrameAllocator.getOrCreate();
                     destFrame.reset(srcTs);
