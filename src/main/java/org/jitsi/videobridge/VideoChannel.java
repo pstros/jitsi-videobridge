@@ -258,6 +258,22 @@ public class VideoChannel
     protected void maybeStartStream()
         throws IOException
     {
+        boolean previouslyStarted = getStream().isStarted();
+        super.maybeStartStream();
+
+        if(getStream().isStarted() && !previouslyStarted)
+        {
+            bitrateController.update(null, -1);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    protected void maybeStartStream()
+        throws IOException
+    {
         MediaStream stream = getStream();
         boolean previouslyStarted = stream != null && stream.isStarted();
 
