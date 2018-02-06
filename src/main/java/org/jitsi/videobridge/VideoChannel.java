@@ -289,13 +289,14 @@ public class VideoChannel
 
         if(getStream().isStarted() && !previouslyStarted)
         {
-            getContent().getChannels().stream()
-                .filter(c -> c != this && c instanceof VideoChannel)
-                .forEach(
-                    c -> {
-                        logger.info("***VC.maybeStartStream BC.update for stream " + getStream().hashCode());
-                        ((VideoChannel) c).bitrateController.update(null, -1);
-                    });
+            bitrateController.update(null, -1);
+//            getContent().getChannels().stream()
+//                .filter(c -> c != this && c instanceof VideoChannel)
+//                .forEach(
+//                    c -> {
+//                        logger.info("***VC.maybeStartStream BC.update for stream " + getStream().hashCode());
+//                        ((VideoChannel) c).bitrateController.update(null, -1);
+//                    });
         }
     }
 
