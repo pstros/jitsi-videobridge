@@ -390,13 +390,13 @@ public class VideoChannel
         return accept;
     }
 
-    @Override
-    public void setEndpoint(String newEndpointId)
-    {
-        logger.info("***VideoChannel " + getID() + " setEndpoint: " + newEndpointId);
-        super.setEndpoint(newEndpointId);
-        bitrateController.update(null, -1);
-    }
+//    @Override
+//    public void setEndpoint(String newEndpointId)
+//    {
+//        logger.info("***VideoChannel " + getID() + " setEndpoint: " + newEndpointId);
+//        super.setEndpoint(newEndpointId);
+//        bitrateController.update(null, -1);
+//    }
 
     /**
      * Gets the {@link BitrateController} which controls which endpoints'
