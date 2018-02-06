@@ -282,9 +282,9 @@ public class SimulcastController
         {
             // If it's not a keyframe we can't switch to it anyway
             logger.info("***SimulcastController.accept ignoring non-keyframe on ssrc " + pkt.getSSRCAsLong() + ", layer: " + sourceBaseLayerIndex);
-            ((RTPTranslatorImpl)sourceTrack.getMediaStreamTrackReceiver().getStream()
-                .getRTPTranslator()).getRtcpFeedbackMessageSender()
-                .sendFIR((int) sourceFrameDesc.getRTPEncoding().getPrimarySSRC());
+//            ((RTPTranslatorImpl)sourceTrack.getMediaStreamTrackReceiver().getStream()
+//                .getRTPTranslator()).getRtcpFeedbackMessageSender()
+//                .sendFIR((int) sourceFrameDesc.getRTPEncoding().getPrimarySSRC());
             return false;
         }
         int targetBaseLayerIndex = sourceEncodings[targetIndex].getBaseLayer().getIndex();

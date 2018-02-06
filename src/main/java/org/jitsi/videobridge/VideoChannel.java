@@ -281,6 +281,28 @@ public class VideoChannel
      * {@inheritDoc}
      */
     @Override
+    protected void maybeStartStream()
+        throws IOException
+    {
+        boolean previouslyStarted = getStream().isStarted();
+        super.maybeStartStream();
+
+        if(getStream().isStarted() && !previouslyStarted)
+        {
+            getContent().getChannels().stream()
+                .filter(c -> c != this && c instanceof VideoChannel)
+                .forEach(
+                    c -> {
+                        logger.info("***VC.maybeStartStream BC.update for stream " + getStream().hashCode());
+                        ((VideoChannel) c).bitrateController.update(null, -1);
+                    });
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public boolean setRtpEncodingParameters(
         List<SourcePacketExtension> sources,
         List<SourceGroupPacketExtension> sourceGroups)
