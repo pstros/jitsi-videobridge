@@ -263,7 +263,21 @@ public class VideoChannel
 
         if(getStream().isStarted() && !previouslyStarted)
         {
-            bitrateController.update(null, -1);
+            Channel[] peerChannels = getContent().getChannels();
+            if (!ArrayUtils.isNullOrEmpty(peerChannels))
+            {
+                for (Channel peerChannel : peerChannels)
+                {
+                    if (peerChannel == this
+                    || !(peerChannel instanceof VideoChannel))
+                    {
+                        continue;
+                    }
+
+                    ((VideoChannel) peerChannel)
+                        .bitrateController.update(null, -1);
+                }
+            }
         }
     }
 
@@ -318,6 +332,7 @@ public class VideoChannel
         throws IOException
     {
         super.initialize(rtpLevelRelayType);
+        bitrateController.update(null, -1);
 
         ((VideoMediaStream) getStream()).getOrCreateBandwidthEstimator()
             .addListener(bitrateController::update);
