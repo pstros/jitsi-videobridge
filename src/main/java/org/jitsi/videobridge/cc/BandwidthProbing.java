@@ -134,7 +134,13 @@ public class BandwidthProbing
         List<Long> ssrcsToProtect = new ArrayList<>();
         for (SimulcastController simulcastController : simulcastControllerList)
         {
-            long currentBps = simulcastController.getSource()
+            MediaStreamTrackDesc sourceTrack = simulcastController.getSource();
+            if (sourceTrack == null)
+            {
+                continue;
+            }
+
+            long currentBps = sourceTrack
                 .getBps(simulcastController.getCurrentIndex(),
                     true /* performTimeoutCheck */);
 

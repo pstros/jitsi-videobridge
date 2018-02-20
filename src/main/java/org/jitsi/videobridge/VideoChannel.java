@@ -283,7 +283,8 @@ public class VideoChannel
             {
                 for (Channel peerChannel : peerChannels)
                 {
-                    if (peerChannel == this)
+                    if (peerChannel == this
+                    || !(peerChannel instanceof VideoChannel))
                     {
                         continue;
                     }
@@ -323,6 +324,7 @@ public class VideoChannel
         throws IOException
     {
         super.initialize(rtpLevelRelayType);
+        bitrateController.update(null, -1);
 
         ((VideoMediaStream) getStream()).getOrCreateBandwidthEstimator()
             .addListener(new BandwidthEstimator.Listener()
@@ -694,7 +696,7 @@ public class VideoChannel
     {
         Endpoint dominantEndpoint = conferenceSpeechActivity.getDominantEndpoint();
 
-        if (getEndpoint().equals(dominantEndpoint))
+        if (dominantEndpoint != null && dominantEndpoint.equals(getEndpoint()))
         {
             // We are the new dominant speaker. We expect other endpoints to
             // mark us as a selected endpoint as soon as they receive the
