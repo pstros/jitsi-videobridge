@@ -74,7 +74,7 @@ public class Health
         for (int i = 0; i < endpoints.length; ++i)
         {
             Endpoint endpoint
-                = conference.getOrCreateEndpoint(generateEndpointID());
+                = (Endpoint) conference.getOrCreateEndpoint(generateEndpointID());
 
             // Fail as quickly as possible.
             if (endpoint == null)
@@ -99,6 +99,21 @@ public class Health
                             /* transportNamespace */ null,
                             initiator,
                             null);
+
+                // FIXME: Without the call to setEndpoint() the channel is not
+                // added to the endpoint and as a result the channels of the two
+                // endpoints will not be connected as part of the health check.
+                // We are now intentionally not doing the call because:
+                // 1. The code has been running like this for a long time
+                //     without any known failures to detect issues.
+                // 2. Connecting a pair of audio channels and a pair of video
+                //     channels with the current code will result in 4
+                //     additional ICE Agents being instantiated, which is a
+                //     significant use of resources.
+                // 3. We have a longer-term solution of refactoring the code to
+                //     use channel bundles which will also solve this problem.
+
+                // rtpChannel.setEndpoint(endpoint);
 
                 // Fail as quickly as possible.
                 if (rtpChannel == null)
@@ -145,12 +160,18 @@ public class Health
             throw new Exception("Address discovery through STUN failed");
         }
 
+        if (!IceUdpTransportManager.healthy)
+        {
+            throw new Exception("Failed to bind single-port");
+        }
+
         // Conference
         Conference conference
             = videobridge.createConference(
                     /* focus */ null,
                     /* name */ null,
-                    /* enableLogging */ false);
+                    /* enableLogging */ false,
+                    /* gid */ null);
 
         // Fail as quickly as possible.
         if (conference == null)
@@ -222,8 +243,13 @@ public class Health
             }
             else
             {
+                // Note that the channel count is 0 because we don't add the
+                // channels we create to the endpoint (see the FIXME in
+                // check(Conference conference))
                 for (int i = 0; i < count; ++i)
+                {
                     connect(aRtpChannels.get(i), bRtpChannels.get(i));
+                }
             }
         }
 

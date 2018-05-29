@@ -15,17 +15,15 @@
  */
 package org.jitsi.videobridge;
 
-import net.java.sip.communicator.util.*;
+import java.util.*;
 
+import net.java.sip.communicator.util.*;
 import org.jitsi.eventadmin.*;
 import org.jitsi.osgi.*;
-
 import org.jitsi.service.configuration.*;
-import org.json.simple.*;
-
 import org.osgi.framework.*;
 
-import java.util.*;
+import static org.jitsi.videobridge.EndpointMessageBuilder.*;
 
 /**
  * This module monitors all endpoints across all conferences currently hosted
@@ -37,18 +35,19 @@ import java.util.*;
  * {@link Channel#lastTransportActivityTime}. When there is no activity for
  * longer than {@link #maxInactivityLimit} it will be assumed that
  * the endpoint is having some connectivity issues. Those may be temporary or
- * permanent. When that happens there will be a Colibri message broadcasted
+ * permanent. When that happens there will be a Colibri message broadcast
  * to all conference endpoints. The Colibri class name of the message is defined
- * in {@link #COLIBRI_CLASS_ENDPOINT_CONNECTIVITY_STATUS} and it will contain
- * "active" attribute set to "false". If those problems turn out to be temporary
- * and the traffic is restored another message is sent with "active" set to
- * "true".
+ * in {@link EndpointMessageBuilder#COLIBRI_CLASS_ENDPOINT_CONNECTIVITY_STATUS}
+ * and it will contain "active" attribute set to "false". If those problems turn
+ * out to be temporary and the traffic is restored another message is sent with
+ * "active" set to "true".
  *
- * The modules is started by OSGi as configured in
+ * The module is started by OSGi as configured in
  * {@link org.jitsi.videobridge.osgi.JvbBundleConfig}
  *
  * @author Pawel Domas
  */
+@SuppressWarnings("unused") // started by OSGi
 public class EndpointConnectionStatus
     extends EventHandlerActivator
 {
@@ -89,13 +88,6 @@ public class EndpointConnectionStatus
         = Logger.getLogger(EndpointConnectionStatus.class);
 
     /**
-     * Constant value defines the name of "colibriClass" for connectivity status
-     * notifications sent over the data channels.
-     */
-    private static final String COLIBRI_CLASS_ENDPOINT_CONNECTIVITY_STATUS
-        = "EndpointConnectivityStatusChangeEvent";
-
-    /**
      * How long it can take an endpoint to send first data, before it will
      * be marked as inactive.
      */
@@ -133,7 +125,7 @@ public class EndpointConnectionStatus
      */
     public EndpointConnectionStatus()
     {
-        super(new String[] { EventFactory.SCTP_CONN_READY_TOPIC });
+        super(new String[] { EventFactory.MSG_TRANSPORT_READY_TOPIC});
     }
 
     /**
@@ -218,41 +210,40 @@ public class EndpointConnectionStatus
             for (Videobridge videobridge : jvbs)
             {
                 Conference[] conferences = videobridge.getConferences();
-                for (Conference conference : conferences)
-                {
-                    List<Endpoint> endpoints = conference.getEndpoints();
-                    for (Endpoint endpoint : endpoints)
-                    {
-                        monitorEndpointActivity(endpoint);
-                    }
-                }
+                Arrays.stream(conferences)
+                    .forEachOrdered(
+                        conference ->
+                            conference.getEndpoints()
+                                .forEach(this::monitorEndpointActivity));
 
                 cleanupExpiredEndpointsStatus();
             }
         }
     }
 
-    private void monitorEndpointActivity(Endpoint endpoint)
+    private void monitorEndpointActivity(AbstractEndpoint abstractEndpoint)
     {
+        if (!(abstractEndpoint instanceof Endpoint))
+        {
+            // We only care about endpoints/participants connected to this
+            // bridge, which are of type Endpoint.
+            return;
+        }
+
+        Endpoint endpoint = (Endpoint) abstractEndpoint;
         String endpointId = endpoint.getID();
-        long lastActivity = 0;
-        long mostRecentChannelCreated = 0;
 
         // Go over all RTP channels to get the latest timestamp
-        List<RtpChannel> rtpChannels = endpoint.getChannels(null);
-        for (RtpChannel channel : rtpChannels)
-        {
-            long channelLastActivity = channel.getLastTransportActivityTime();
-            if (channelLastActivity > lastActivity)
-            {
-                lastActivity = channelLastActivity;
-            }
-            long creationTimestamp = channel.getCreationTimestamp();
-            if (creationTimestamp > mostRecentChannelCreated)
-            {
-                mostRecentChannelCreated = creationTimestamp;
-            }
-        }
+        List<RtpChannel> rtpChannels = endpoint.getChannels();
+        long lastActivity
+            = rtpChannels.stream()
+                .mapToLong(RtpChannel::getLastTransportActivityTime)
+                .max().orElse(0);
+        long mostRecentChannelCreated
+            = rtpChannels.stream()
+                .mapToLong(RtpChannel::getCreationTimestamp)
+                .max().orElse(0);
+
         // Also check SctpConnection
         SctpConnection sctpConnection = endpoint.getSctpConnection();
         if (sctpConnection != null)
@@ -325,28 +316,26 @@ public class EndpointConnectionStatus
         }
     }
 
-    private void sendEndpointConnectionStatus(Endpoint    subjectEndpoint,
-                                              boolean     isConnected,
-                                              Endpoint    msgReceiver)
+    private void sendEndpointConnectionStatus(
+        Endpoint subjectEndpoint, boolean isConnected, Endpoint msgReceiver)
     {
         Conference conference = subjectEndpoint.getConference();
         if (conference != null)
         {
             String msg
                 = createEndpointConnectivityStatusChangeEvent(
-                        subjectEndpoint, isConnected);
+                        subjectEndpoint.getID(), isConnected);
             if (msgReceiver == null)
             {
                 // We broadcast the message also to the endpoint itself for
-                // debugging purposes
-                conference.broadcastMessageOnDataChannels(msg);
+                // debugging purposes, and we also broadcast it through Octo.
+                conference.broadcastMessage(msg, true /* sendToOcto */);
             }
             else
             {
                 // Send only to the receiver endpoint
-                ArrayList<Endpoint> receivers = new ArrayList<>(1);
-                receivers.add(msgReceiver);
-
+                List<AbstractEndpoint> receivers
+                    = Collections.singletonList(msgReceiver);
                 conference.sendMessage(msg, receivers);
             }
         }
@@ -359,36 +348,17 @@ public class EndpointConnectionStatus
         }
     }
 
-    private String createEndpointConnectivityStatusChangeEvent(
-            Endpoint endpoint, boolean connected)
-    {
-        return
-            "{\"colibriClass\":\""
-                + COLIBRI_CLASS_ENDPOINT_CONNECTIVITY_STATUS
-                + "\",\"endpoint\":\"" + JSONValue.escape(endpoint.getID())
-                +"\", \"active\":\"" + String.valueOf(connected)
-                + "\"}";
-    }
-
     private void cleanupExpiredEndpointsStatus()
     {
-        Iterator<Endpoint> endpoints = inactiveEndpoints.iterator();
-        while (endpoints.hasNext())
+        inactiveEndpoints.removeIf(e -> e.getConference().isExpired());
+        if (logger.isDebugEnabled())
         {
-            Endpoint endpoint = endpoints.next();
-            if (endpoint.getConference().isExpired())
-            {
-                logger.debug("Removing endpoint from expired conference: "
-                        + endpoint.getID());
-
-                endpoints.remove();
-            }
-            else if (endpoint.isExpired() && logger.isDebugEnabled())
-            {
-                logger.debug(
-                        "Endpoint has expired: " + endpoint.getID()
-                            + ", but still on the list");
-            }
+            inactiveEndpoints.stream()
+                .filter(Endpoint::isExpired)
+                .forEach(
+                    e ->
+                        logger.debug("Endpoint has expired: " + e.getID()
+                            + ", but is still on the list"));
         }
     }
 
@@ -398,7 +368,7 @@ public class EndpointConnectionStatus
         // Verify the topic just in case
         // FIXME eventually add this verification to the base class
         String topic = event.getTopic();
-        if (!EventFactory.SCTP_CONN_READY_TOPIC.equals(topic))
+        if (!EventFactory.MSG_TRANSPORT_READY_TOPIC.equals(topic))
         {
             logger.warn("Received event for unexpected topic: " + topic);
             return;
@@ -424,13 +394,8 @@ public class EndpointConnectionStatus
         //
         // Looping over all inactive endpoints of all conferences maybe is not
         // the most efficient, but it should not be extremely large number.
-        for (Endpoint potentialSubject : inactiveEndpoints)
-        {
-            if (potentialSubject.getConference() == conference)
-            {
-                sendEndpointConnectionStatus(
-                        potentialSubject, false, endpoint);
-            }
-        }
+        inactiveEndpoints.stream()
+            .filter(e -> e.getConference() == conference)
+            .forEach(e -> sendEndpointConnectionStatus(e, false, endpoint));
     }
 }

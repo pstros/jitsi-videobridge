@@ -32,6 +32,7 @@ import org.jitsi.videobridge.stats.*;
 import org.jivesoftware.smack.packet.*;
 import org.json.simple.*;
 import org.json.simple.parser.*;
+import org.jxmpp.jid.impl.*;
 import org.osgi.framework.*;
 
 /**
@@ -504,7 +505,9 @@ class HandlerImpl
                 Statistics statistics = null;
 
                 if (i.hasNext())
+                {
                     statistics = i.next();
+                }
 
                 JSONObject statisticsJSONObject
                     = JSONSerializer.serializeStatistics(statistics);
@@ -512,9 +515,13 @@ class HandlerImpl
 
                 response.setStatus(HttpServletResponse.SC_OK);
                 if (statisticsJSONObject == null)
+                {
                     writer.write("null");
+                }
                 else
+                {
                     statisticsJSONObject.writeJSONString(writer);
+                }
 
                 return;
             }
@@ -639,7 +646,7 @@ class HandlerImpl
                             {
                                 String message = String.format("Failed to patch" +
                                         " conference: %s, message: %s", target,
-                                        responseIQ.getError().getMessage());
+                                        responseIQ.getError().getDescriptiveText());
                                 logger.error(message);
                                 response.getOutputStream().println(message);
                             }
@@ -776,7 +783,7 @@ class HandlerImpl
                         {
                             String message = String.format("Failed to create " +
                                     "conference, message: %s",responseIQ
-                                    .getError().getMessage());
+                                    .getError().getDescriptiveText());
                             logger.error(message);
                             response.getOutputStream().println(message);
 
@@ -867,7 +874,7 @@ class HandlerImpl
                 ipAddress = request.getRemoteAddr();
             }
 
-            requestShutdownIQ.setFrom(ipAddress);
+            requestShutdownIQ.setFrom(JidCreate.from(ipAddress));
 
             try
             {
@@ -875,7 +882,7 @@ class HandlerImpl
                     = videobridge.handleShutdownIQ(
                             requestShutdownIQ);
 
-                if (IQ.Type.RESULT.equals(responseIQ.getType()))
+                if (IQ.Type.result.equals(responseIQ.getType()))
                 {
                     status = HttpServletResponse.SC_OK;
                 }

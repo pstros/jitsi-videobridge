@@ -1,5 +1,5 @@
 /*
- * Copyright @ 2015 Atlassian Pty Ltd
+ * Copyright @ 2018 Atlassian Pty Ltd
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,28 +13,24 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.jitsi.videobridge;
+package org.jitsi.videobridge.util;
 
 /**
- * Implements <tt>WebRtcDataStreamListener</tt> in order to facilitate
- * implementers through extending and overriding methods of interest.
+ * An interface for an object which can be expired in a thread safe manner.
  *
- * @author Lyubomir Marinov
+ * @author Boris Grozev
  */
-public class WebRtcDataStreamAdapter
-    implements WebRtcDataStreamListener
+public interface Expireable
 {
     /**
-     * {@inheritDoc}
+     * Checks whether this instance is ready to be expired.
+     * @return {@code true} if this instance is ready to be expired, and
+     * {@code false} otherwise.
      */
-    @Override
-    public void onChannelOpened(SctpConnection source, WebRtcDataStream channel)
-    {
-    }
+    boolean shouldExpire();
 
     /**
-     * {@inheritDoc}
+     * Tries to expire this {@link Expireable}. Thread safe.
      */
-    @Override
-    public void onSctpConnectionReady(SctpConnection source) {}
+    void safeExpire();
 }

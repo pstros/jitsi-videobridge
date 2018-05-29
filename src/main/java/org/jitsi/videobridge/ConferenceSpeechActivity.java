@@ -134,7 +134,7 @@ public class ConferenceSpeechActivity
 
         if (ssrc != -1)
         {
-            Endpoint endpoint
+            AbstractEndpoint endpoint
                 = conference.findEndpointByReceiveSSRC(ssrc, MediaType.AUDIO);
 
             if (endpoint != null)
@@ -150,15 +150,7 @@ public class ConferenceSpeechActivity
      * speaker in this multipoint conference.
      */
     private final ActiveSpeakerChangedListener activeSpeakerChangedListener
-        = new ActiveSpeakerChangedListener()
-                {
-                    @Override
-                    public void activeSpeakerChanged(long ssrc)
-                    {
-                        ConferenceSpeechActivity.this.activeSpeakerChanged(
-                                ssrc);
-                    }
-                };
+        = ConferenceSpeechActivity.this::activeSpeakerChanged;
 
     /**
      * The <tt>ActiveSpeakerDetector</tt> which detects/identifies the
@@ -185,7 +177,7 @@ public class ConferenceSpeechActivity
      * The <tt>Endpoint</tt> which is the dominant speaker in
      * {@link #conference}.
      */
-    private Endpoint dominantEndpoint;
+    private AbstractEndpoint dominantEndpoint;
 
     /**
      * The indicator which signals to {@link #eventDispatcher} that
@@ -205,7 +197,7 @@ public class ConferenceSpeechActivity
      * {@link #conference} with the dominant (speaker) <tt>Endpoint</tt> at the
      * beginning of the list i.e. the dominant speaker history.
      */
-    private List<Endpoint> endpoints;
+    private List<AbstractEndpoint> endpoints;
 
     /**
      * The indicator which signals to {@link #eventDispatcher} that the
@@ -286,7 +278,7 @@ public class ConferenceSpeechActivity
                             + ".");
             }
 
-            Endpoint endpoint
+            AbstractEndpoint endpoint
                 = conference.findEndpointByReceiveSSRC(ssrc, MediaType.AUDIO);
             boolean maybeStartEventDispatcher = false;
 
@@ -302,7 +294,7 @@ public class ConferenceSpeechActivity
                 }
                 else
                 {
-                    Endpoint dominantEndpoint = getDominantEndpoint();
+                    AbstractEndpoint dominantEndpoint = getDominantEndpoint();
 
                     if (!endpoint.equals(dominantEndpoint))
                     {
@@ -541,9 +533,9 @@ public class ConferenceSpeechActivity
      * @return the <tt>Endpoint</tt> which is the dominant speaker in the
      * multipoint conference represented by this instance or <tt>null</tt>
      */
-    public Endpoint getDominantEndpoint()
+    public AbstractEndpoint getDominantEndpoint()
     {
-        Endpoint dominantEndpoint;
+        AbstractEndpoint dominantEndpoint;
 
         synchronized (syncRoot)
         {
@@ -555,7 +547,9 @@ public class ConferenceSpeechActivity
             {
                 dominantEndpoint = this.dominantEndpoint;
                 if (dominantEndpoint.isExpired())
+                {
                     this.dominantEndpoint = null;
+                }
             }
         }
         return dominantEndpoint;
@@ -586,9 +580,9 @@ public class ConferenceSpeechActivity
      * multipoint conference represented by this instance with the dominant
      * (speaker) <tt>Endpoint</tt> at the beginning of the list
      */
-    public List<Endpoint> getEndpoints()
+    public List<AbstractEndpoint> getEndpoints()
     {
-        List<Endpoint> ret;
+        List<AbstractEndpoint> ret;
 
         synchronized (syncRoot)
         {
@@ -609,24 +603,16 @@ public class ConferenceSpeechActivity
                 }
                 else
                 {
-                    List<Endpoint> conferenceEndpoints
+                    List<AbstractEndpoint> conferenceEndpoints
                         = conference.getEndpoints();
 
-                    endpoints = new ArrayList<>(conferenceEndpoints.size());
-                    for (Endpoint endpoint : conferenceEndpoints)
-                        endpoints.add(endpoint);
+                    endpoints = new ArrayList<>(conferenceEndpoints);
                 }
             }
 
             // The return value is the list of Endpoints of this instance.
-            ret = new ArrayList<>(endpoints.size());
-            for (Iterator<Endpoint> i = endpoints.iterator(); i.hasNext();)
-            {
-                Endpoint endpoint = i.next();
-
-                if (endpoint != null)
-                    ret.add(endpoint);
-            }
+            ret = new ArrayList<>(endpoints);
+            ret.removeIf(Objects::isNull);
         }
         return ret;
     }
@@ -652,13 +638,9 @@ public class ConferenceSpeechActivity
             = getActiveSpeakerDetector();
 
         if (activeSpeakerDetector != null)
+        {
             activeSpeakerDetector.levelChanged(ssrc, level);
-
-        // Endpoint
-        Endpoint endpoint = channel.getEndpoint();
-
-        if (endpoint != null)
-            endpoint.audioLevelChanged(channel, ssrc, level);
+        }
     }
 
     /**
@@ -714,7 +696,9 @@ public class ConferenceSpeechActivity
         Conference conference = getConference();
 
         if (conference == null)
+        {
             return;
+        }
 
         String propertyName = ev.getPropertyName();
 
@@ -727,18 +711,6 @@ public class ConferenceSpeechActivity
                     endpointsChanged = true;
                     maybeStartEventDispatcher();
                 }
-            }
-        }
-        else if (DominantSpeakerIdentification.DOMINANT_SPEAKER_PROPERTY_NAME
-                .equals(propertyName))
-        {
-            DominantSpeakerIdentification dominantSpeakerIdentification
-                = this.dominantSpeakerIdentification;
-
-            if ((dominantSpeakerIdentification != null)
-                    && dominantSpeakerIdentification.equals(ev.getSource()))
-            {
-                // TODO Auto-generated method stub
             }
         }
     }
@@ -766,7 +738,9 @@ public class ConferenceSpeechActivity
              * soon as this ConferenceSpeechActivity stops employing it.
              */
             if (this.eventDispatcher != eventDispatcher)
+            {
                 return false;
+            }
 
             /*
              * As soon as the Conference associated with this instance expires,
@@ -775,7 +749,9 @@ public class ConferenceSpeechActivity
             Conference conference = getConference();
 
             if (conference == null)
+            {
                 return false;
+            }
 
             long now = System.currentTimeMillis();
 
@@ -802,15 +778,11 @@ public class ConferenceSpeechActivity
              * Synchronize the set of Endpoints of this instance with the set of
              * Endpoints of the conference.
              */
-            List<Endpoint> conferenceEndpoints = conference.getEndpoints();
+            List<AbstractEndpoint> conferenceEndpoints = conference.getEndpoints();
 
             if (endpoints == null)
             {
-                endpoints = new ArrayList<>(conferenceEndpoints.size());
-                for (Endpoint endpoint : conferenceEndpoints)
-                {
-                    endpoints.add(endpoint);
-                }
+                endpoints = new ArrayList<>(conferenceEndpoints);
                 endpointsChanged = true;
             }
             else
@@ -819,37 +791,16 @@ public class ConferenceSpeechActivity
                  * Remove the Endpoints of this instance which are no longer in
                  * the conference.
                  */
-                for (Iterator<Endpoint> i = endpoints.iterator(); i.hasNext();)
-                {
-                    Endpoint endpoint = i.next();
+                endpointsChanged
+                    = endpoints.removeIf(
+                        e -> e.isExpired() || !conferenceEndpoints.contains(e));
+                conferenceEndpoints.removeAll(endpoints);
 
-                    if (endpoint.isExpired())
-                    {
-                        i.remove();
-                        endpointsChanged = true;
-                    }
-                    else if (conferenceEndpoints.contains(endpoint))
-                    {
-                        conferenceEndpoints.remove(endpoint);
-                    }
-                    else
-                    {
-                        i.remove();
-                        endpointsChanged = true;
-                    }
-                }
                 /*
                  * Add the Endpoints of the conference which are not in this
                  * instance yet.
                  */
-                if (!conferenceEndpoints.isEmpty())
-                {
-                    for (Endpoint endpoint : conferenceEndpoints)
-                    {
-                        endpoints.add(endpoint);
-                    }
-                    endpointsChanged = true;
-                }
+                endpointsChanged |= endpoints.addAll(conferenceEndpoints);
             }
             this.endpointsChanged = false;
 
@@ -857,7 +808,7 @@ public class ConferenceSpeechActivity
              * Make sure that the dominantEndpoint is at the top of the list of
              * the Endpoints of this instance.
              */
-            Endpoint dominantEndpoint = getDominantEndpoint();
+            AbstractEndpoint dominantEndpoint = getDominantEndpoint();
 
             if (dominantEndpoint != null)
             {
@@ -877,9 +828,13 @@ public class ConferenceSpeechActivity
         }
 
         if (endpointsChanged)
+        {
             firePropertyChange(ENDPOINTS_PROPERTY_NAME, null, null);
+        }
         if (dominantEndpointChanged)
+        {
             firePropertyChange(DOMINANT_ENDPOINT_PROPERTY_NAME, null, null);
+        }
 
         return true;
     }
@@ -932,7 +887,9 @@ public class ConferenceSpeechActivity
                     ConferenceSpeechActivity owner = this.owner.get();
 
                     if ((owner == null) || !owner.runInEventDispatcher(this))
+                    {
                         break;
+                    }
                 }
                 while (true);
             }

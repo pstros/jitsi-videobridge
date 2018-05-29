@@ -16,13 +16,8 @@
 package org.jitsi.videobridge;
 
 import java.io.*;
-import java.lang.ref.*;
 import java.util.*;
-
-import org.jitsi.impl.neomedia.rtp.*;
-import org.jitsi.service.neomedia.*;
 import org.jitsi.util.*;
-import org.jitsi.util.event.*;
 import org.jitsi.videobridge.rest.*;
 
 /**
@@ -34,16 +29,8 @@ import org.jitsi.videobridge.rest.*;
  * @author George Politis
  */
 public class Endpoint
-    extends PropertyChangeNotifier
-    implements WebRtcDataStream.DataCallback
+    extends AbstractEndpoint
 {
-    /**
-     * The name of the <tt>Endpoint</tt> property <tt>channels</tt> which lists
-     * the <tt>RtpChannel</tt>s associated with the <tt>Endpoint</tt>.
-     */
-    public static final String CHANNELS_PROPERTY_NAME
-        = Endpoint.class.getName() + ".channels";
-
     /**
      * The {@link Logger} used by the {@link Endpoint} class to print debug
      * information.
@@ -59,14 +46,6 @@ public class Endpoint
         = Endpoint.class.getName() + ".pinnedEndpoints";
 
     /**
-     * The name of the <tt>Endpoint</tt> property <tt>sctpConnection</tt> which
-     * specifies the <tt>SctpConnection</tt> associated with the
-     * <tt>Endpoint</tt>.
-     */
-    public static final String SCTP_CONNECTION_PROPERTY_NAME
-        = Endpoint.class.getName() + ".sctpConnection";
-
-    /**
      * The name of the <tt>Endpoint</tt> property <tt>selectedEndpoint</tt>
      * which specifies the JID of the currently selected <tt>Endpoint</tt> of
      * this <tt>Endpoint</tt>.
@@ -80,44 +59,6 @@ public class Endpoint
     @Deprecated
     public final static String ENABLE_LIPSYNC_HACK_PNAME
         = Endpoint.class.getName() + ".ENABLE_LIPSYNC_HACK";
-
-    /**
-     * The list of <tt>Channel</tt>s associated with this <tt>Endpoint</tt>.
-     */
-    private final List<WeakReference<RtpChannel>> channels = new LinkedList<>();
-
-    /**
-     * The (human readable) display name of this <tt>Endpoint</tt>.
-     */
-    private String displayName;
-
-    /**
-     * The indicator which determines whether {@link #expire()} has been called
-     * on this <tt>Endpoint</tt>.
-     */
-    private boolean expired = false;
-
-    /**
-     * The (unique) identifier/ID of the endpoint of a participant in a
-     * <tt>Conference</tt>.
-     */
-    private final String id;
-
-    /**
-     * The string used to identify this endpoint for the purposes of logging.
-     */
-    private final String loggingId;
-
-    /**
-     * SCTP connection bound to this endpoint.
-     */
-    private WeakReference<SctpConnection> sctpConnection
-        = new WeakReference<>(null);
-
-    /**
-     * A reference to the <tt>Conference</tt> this <tt>Endpoint</tt> belongs to.
-     */
-    private final Conference conference;
 
     /**
      * The set of IDs of the pinned endpoints of this {@code Endpoint}.
@@ -137,11 +78,6 @@ public class Endpoint
     private final Logger logger;
 
     /**
-     * The instance handling the transport of COLIBRI messages for this endpoint.
-     */
-    private final EndpointMessageTransport messageTransport;
-
-    /**
      * The password of the ICE Agent associated with this endpoint: note that
      * without bundle an endpoint might have multiple channels with different
      * ICE Agents. In this case one of the channels will be chosen (in an
@@ -150,6 +86,8 @@ public class Endpoint
      * Initialized lazily.
      */
     private String icePassword;
+
+    private final EndpointMessageTransport messageTransport;
 
     /**
      * Initializes a new <tt>Endpoint</tt> instance with a specific (unique)
@@ -161,183 +99,39 @@ public class Endpoint
      */
     public Endpoint(String id, Conference conference)
     {
-        this.conference = Objects.requireNonNull(conference, "conference");
-        this.id = Objects.requireNonNull(id, "id");
-        loggingId = conference.getLoggingId() + ",endp_id=" + id;
+        super(conference, id);
 
+        messageTransport = new EndpointMessageTransport(this);
         this.logger = Logger.getLogger(classLogger, conference.getLogger());
-        this.messageTransport = new EndpointMessageTransport(this);
     }
 
     /**
-     * Adds a specific <tt>Channel</tt> to the list of <tt>Channel</tt>s
-     * associated with this <tt>Endpoint</tt>.
-     *
-     * @param channel the <tt>Channel</tt> to add to the list of
-     * <tt>Channel</tt>s associated with this <tt>Endpoint</tt>
-     * @return <tt>true</tt> if the list of <tt>Channel</tt>s associated with
-     * this <tt>Endpoint</tt> changed as a result of the method invocation;
-     * otherwise, <tt>false</tt>
+     * {@inheritDoc}
      */
-    public boolean addChannel(RtpChannel channel)
+    @Override
+    public EndpointMessageTransport getMessageTransport()
     {
-        if (channel == null)
-            throw new NullPointerException("channel");
-
-        // The expire state of Channel is final. Adding an expired Channel to
-        // an Endpoint is a no-op.
-        if (channel.isExpired())
-            return false;
-
-        boolean added = false;
-        boolean removed = false;
-
-        synchronized (channels)
-        {
-            boolean add = true;
-
-            for (Iterator<WeakReference<RtpChannel>> i = channels.iterator();
-                    i.hasNext();)
-            {
-                RtpChannel c = i.next().get();
-
-                if (c == null)
-                {
-                    i.remove();
-                    removed = true;
-                }
-                else if (c.equals(channel))
-                {
-                    add = false;
-                }
-                else if (c.isExpired())
-                {
-                    i.remove();
-                    removed = true;
-                }
-            }
-            if (add)
-            {
-                channels.add(new WeakReference<>(channel));
-                added = true;
-            }
-        }
-
-        if (added || removed)
-            firePropertyChange(CHANNELS_PROPERTY_NAME, null, null);
-
-        return added;
+        return messageTransport;
     }
 
     /**
-     * Notifies this <tt>Endpoint</tt> that an associated <tt>Channel</tt> has
-     * received or measured a new audio level for a specific (contributing)
-     * synchronization source identifier/SSRC.
-     *
-     * @param channel the <tt>Channel</tt> which has received or measured the
-     * specified <tt>audioLevel</tt> for the specified <tt>ssrc</tt>
-     * @param ssrc the synchronization source identifier/SSRC of the RTP stream
-     * received within the specified <tt>channel</tt> for which the specified
-     * <tt>audioLevel</tt> was received or measured
-     * @param audioLevel the audio level which was received or measured for the
-     * specified <tt>ssrc</tt> received within the specified <tt>channel</tt>
-     */
-    void audioLevelChanged(Channel channel, long ssrc, int audioLevel)
-    {
-    }
-
-    /**
-     * Gets the number of <tt>RtpChannel</tt>s of this <tt>Endpoint</tt> which,
-     * optionally, are of a specific <tt>MediaType</tt>.
-     *
-     * @param mediaType the <tt>MediaType</tt> of the <tt>RtpChannel</tt>s to
-     * count or <tt>null</tt> to count all <tt>RtpChannel</tt>s of this
-     * <tt>Endpoint</tt>
-     * @return the number of <tt>RtpChannel</tt>s of this <tt>Endpoint</tt>
-     * which, optionally, are of the specified <tt>mediaType</tt>
-     */
-    public int getChannelCount(MediaType mediaType)
-    {
-        return getChannels(mediaType).size();
-    }
-
-    /**
-     * Gets a list with the {@link RtpChannel}s of this {@link Endpoint} with a
-     * particular {@link MediaType} (or all of them, if {@code mediaType} is
-     * {@code null}).
-     *
-     * @param mediaType the {@link MediaType} to match. If {@code null}, all
-     * channels of this endpoint will be returned.
-     * @return a <tt>List</tt> with the channels of this <tt>Endpoint</tt> with
-     * a particular <tt>MediaType</tt>.
-     */
-    public List<RtpChannel> getChannels(MediaType mediaType)
-    {
-        boolean removed = false;
-        List<RtpChannel> channels = new LinkedList<>();
-
-        synchronized (this.channels)
-        {
-            for (Iterator<WeakReference<RtpChannel>> i
-                        = this.channels.iterator();
-                    i.hasNext();)
-            {
-                RtpChannel c = i.next().get();
-
-                if ((c == null) || c.isExpired())
-                {
-                    i.remove();
-                    removed = true;
-                }
-                else if ((mediaType == null)
-                        || mediaType.equals(c.getContent().getMediaType()))
-                {
-                    channels.add(c);
-                }
-            }
-        }
-
-        if (removed)
-            firePropertyChange(CHANNELS_PROPERTY_NAME, null, null);
-
-        return channels;
-    }
-
-    /**
-     * Returns the display name of this <tt>Endpoint</tt>.
-     *
-     * @return the display name of this <tt>Endpoint</tt>.
-     */
-    public String getDisplayName()
-    {
-        return displayName;
-    }
-
-    /**
-     * Gets the (unique) identifier/ID of this instance.
-     *
-     * @return the (unique) identifier/ID of this instance
-     */
-    public final String getID()
-    {
-        return id;
-    }
-
-    /**
-     * Returns an <tt>SctpConnection</tt> bound to this <tt>Endpoint</tt>.
+     * Returns this {@link Endpoint}'s {@link SctpConnection}, if any. Note
+     * that this should NOT be used for sending messages -- use the abstract
+     * {@link EndpointMessageTransport} instead.
      *
      * @return an <tt>SctpConnection</tt> bound to this <tt>Endpoint</tt> or
      * <tt>null</tt> otherwise.
      */
     public SctpConnection getSctpConnection()
     {
-        return sctpConnection.get();
+        return getMessageTransport().getSctpConnection();
     }
 
     /**
      * @return the {@link Set} of selected endpoints, represented as a set of
      * endpoint IDs.
      */
+    @Override
     public Set<String> getSelectedEndpoints()
     {
         return selectedEndpoints;
@@ -347,40 +141,10 @@ public class Endpoint
      * @return the {@link Set} of pinned endpoints, represented as a set of
      * endpoint IDs.
      */
+    @Override
     public Set<String> getPinnedEndpoints()
     {
         return pinnedEndpoints;
-    }
-
-    /**
-     * Gets the <tt>Conference</tt> to which this <tt>Endpoint</tt> belongs.
-     *
-     * @return the <tt>Conference</tt> to which this <tt>Endpoint</tt> belongs.
-     */
-    public Conference getConference()
-    {
-        return this.conference;
-    }
-
-    /**
-     * Checks whether or not this <tt>Endpoint</tt> is considered "expired"
-     * ({@link #expire()} method has been called).
-     *
-     * @return <tt>true</tt> if this instance is "expired" or <tt>false</tt>
-     * otherwise.
-     */
-    public boolean isExpired()
-    {
-        return expired;
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    @Override
-    public void onBinaryData(WebRtcDataStream src, byte[] data)
-    {
-        messageTransport.onBinaryData(src, data);
     }
 
     void pinnedEndpointsChanged(Set<String> newPinnedEndpoints)
@@ -390,6 +154,12 @@ public class Endpoint
         if (!oldPinnedEndpoints.equals(newPinnedEndpoints))
         {
             this.pinnedEndpoints = newPinnedEndpoints;
+
+            if (logger.isDebugEnabled())
+            {
+                logger.debug(getID() + " pinned "
+                    + Arrays.toString(pinnedEndpoints.toArray()));
+            }
 
             firePropertyChange(PINNED_ENDPOINTS_PROPERTY_NAME,
                 oldPinnedEndpoints, pinnedEndpoints);
@@ -404,86 +174,14 @@ public class Endpoint
         {
             this.selectedEndpoints = newSelectedEndpoints;
 
+            if (logger.isDebugEnabled())
+            {
+                logger.debug(getID() + " selected "
+                    + Arrays.toString(selectedEndpoints.toArray()));
+            }
+
             firePropertyChange(SELECTED_ENDPOINTS_PROPERTY_NAME,
                 oldSelectedEndpoints, selectedEndpoints);
-        }
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    @Override
-    public void onStringData(WebRtcDataStream src, String msg)
-    {
-        messageTransport.onStringData(src, msg);
-    }
-
-    /**
-     * Removes a specific <tt>Channel</tt> from the list of <tt>Channel</tt>s
-     * associated with this <tt>Endpoint</tt>.
-     *
-     * @param channel the <tt>Channel</tt> to remove from the list of
-     * <tt>Channel</tt>s associated with this <tt>Endpoint</tt>
-     * @return <tt>true</tt> if the list of <tt>Channel</tt>s associated with
-     * this <tt>Endpoint</tt> changed as a result of the method invocation;
-     * otherwise, <tt>false</tt>
-     */
-    public boolean removeChannel(RtpChannel channel)
-    {
-        if (channel == null)
-            return false;
-
-        boolean removed = false;
-
-        synchronized (channels)
-        {
-            for (Iterator<WeakReference<RtpChannel>> i = channels.iterator();
-                    i.hasNext();)
-            {
-                Channel c = i.next().get();
-
-                if ((c == null) || c.equals(channel) || c.isExpired())
-                {
-                    i.remove();
-                    removed = true;
-                }
-            }
-        }
-
-        if (removed)
-            firePropertyChange(CHANNELS_PROPERTY_NAME, null, null);
-
-        return removed;
-    }
-
-    /**
-     * Notifies this <tt>Endpoint</tt> that its associated
-     * <tt>SctpConnection</tt> has become ready i.e. connected to the remote
-     * peer and operational.
-     *
-     * @param sctpConnection the <tt>SctpConnection</tt> which has become ready
-     * and is the cause of the method invocation
-     */
-    void sctpConnectionReady(SctpConnection sctpConnection)
-    {
-        if (sctpConnection.equals(getSctpConnection())
-                && !sctpConnection.isExpired()
-                && sctpConnection.isReady())
-        {
-            for (RtpChannel channel : getChannels(null))
-                channel.sctpConnectionReady(this);
-
-            WebRtcDataStream dataStream;
-
-            try
-            {
-                dataStream = sctpConnection.getDefaultDataStream();
-                dataStream.setDataCallback(this);
-            }
-            catch (IOException e)
-            {
-                logger.error("Could not get the default data stream.", e);
-            }
         }
     }
 
@@ -494,20 +192,44 @@ public class Endpoint
      * @param msg message text to send.
      * @throws IOException
      */
+    @Override
     public void sendMessage(String msg)
         throws IOException
     {
-        messageTransport.sendMessage(msg);
+        EndpointMessageTransport messageTransport
+            = getMessageTransport();
+        if (messageTransport != null)
+        {
+            messageTransport.sendMessage(msg);
+        }
     }
 
     /**
-     * Sets the display name of this <tt>Endpoint</tt>.
-     *
-     * @param displayName the display name to set on this <tt>Endpoint</tt>.
+     * Expires this {@link Endpoint} if it has no channels and no SCTP connection.
      */
-    public void setDisplayName(String displayName)
+    @Override
+    protected void maybeExpire()
     {
-        this.displayName = displayName;
+        if (getSctpConnection() == null && getChannelCount(null) == 0)
+        {
+            expire();
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void expire()
+    {
+        super.expire();
+
+        AbstractEndpointMessageTransport messageTransport
+            = getMessageTransport();
+        if (messageTransport != null)
+        {
+            messageTransport.close();
+        }
     }
 
     /**
@@ -516,94 +238,25 @@ public class Endpoint
      * @param sctpConnection the <tt>SctpConnection</tt> to be bound to this
      * <tt>Endpoint</tt>.
      */
-    public void setSctpConnection(SctpConnection sctpConnection)
+    void setSctpConnection(SctpConnection sctpConnection)
     {
-        Object oldValue = getSctpConnection();
-
-        if (!Objects.equals(oldValue, sctpConnection))
+        EndpointMessageTransport messageTransport
+            = getMessageTransport();
+        if (messageTransport != null)
         {
-            if (oldValue != null && sctpConnection != null)
-            {
-                // This is not necessarily invalid, but with the current
-                // codebase it likely indicates a problem. If we start to
-                // actually use it, this warning should be removed.
-                logger.warn("Replacing an Endpoint's SctpConnection.");
-            }
-
-            this.sctpConnection = new WeakReference<>(sctpConnection);
-
-            firePropertyChange(
-                    SCTP_CONNECTION_PROPERTY_NAME,
-                    oldValue, getSctpConnection());
-        }
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    @Override
-    public String toString()
-    {
-        return getClass().getName() + " " + getID();
-    }
-
-    /**
-     * Expires this <tt>Endpoint</tt>.
-     */
-    public void expire()
-    {
-        this.expired = true;
-    }
-
-    /**
-     * @return a string which identifies this {@link Endpoint} for the
-     * purposes of logging. The string is a comma-separated list of "key=value"
-     * pairs.
-     */
-    public String getLoggingId()
-    {
-        return loggingId;
-    }
-
-    /**
-     * Gets an array that contains all the {@link MediaStreamTrackDesc} of the
-     * specified media type associated with this {@link Endpoint}.
-     *
-     * @param mediaType the media type of the {@link MediaStreamTrackDesc} to
-     * get.
-     * @return an array that contains all the {@link MediaStreamTrackDesc} of
-     * the specified media type associated with this {@link Endpoint}, or null.
-     */
-    public MediaStreamTrackDesc[] getMediaStreamTracks(MediaType mediaType)
-    {
-        List<RtpChannel> videoChannels = getChannels(mediaType);
-
-        if (videoChannels == null || videoChannels.isEmpty())
-        {
-            return null;
+            messageTransport.setSctpConnection(sctpConnection);
         }
 
-        MediaStreamTrackDesc[] ret = videoChannels.get(0)
-            .getStream().getMediaStreamTrackReceiver().getMediaStreamTracks();
-
-        if (videoChannels.size() > 1)
+        if (getSctpConnection() == null)
         {
-            // XXX At the time of this writing each endpoint has a single
-            // video channel.
-            for (int i = 1; i < videoChannels.size(); i++)
-            {
-                ret = ArrayUtils.concat(ret, videoChannels.get(i).getStream()
-                    .getMediaStreamTrackReceiver().getMediaStreamTracks());
-            }
+            maybeExpire();
         }
-
-        return ret;
     }
 
     /**
      * Checks whether a WebSocket connection with a specific password string
      * should be accepted for this {@link Endpoint}.
-     * @param icePassword the
+     * @param password the
      * @return {@code true} iff the password matches and the WebSocket
      */
     public boolean acceptWebSocket(String password)
@@ -627,7 +280,12 @@ public class Endpoint
      */
     public void onWebSocketConnect(ColibriWebSocket ws)
     {
-        messageTransport.onWebSocketConnect(ws);
+        EndpointMessageTransport messageTransport
+            = getMessageTransport();
+        if (messageTransport != null)
+        {
+            messageTransport.onWebSocketConnect(ws);
+        }
     }
 
     /**
@@ -638,7 +296,12 @@ public class Endpoint
     public void onWebSocketClose(
             ColibriWebSocket ws, int statusCode, String reason)
     {
-        messageTransport.onWebSocketClose(ws, statusCode, reason);
+        EndpointMessageTransport messageTransport
+            = getMessageTransport();
+        if (messageTransport != null)
+        {
+            messageTransport.onWebSocketClose(ws, statusCode, reason);
+        }
     }
 
     /**
@@ -648,21 +311,26 @@ public class Endpoint
      */
     public void onWebSocketText(ColibriWebSocket ws, String message)
     {
-        messageTransport.onWebSocketText(ws, message);
+        EndpointMessageTransport messageTransport
+            = getMessageTransport();
+        if (messageTransport != null)
+        {
+            messageTransport.onWebSocketText(ws, message);
+        }
     }
 
     /**
      * @return the password of the ICE Agent associated with this
      * {@link Endpoint}.
      */
-    String getIcePassword()
+    private String getIcePassword()
     {
         if (icePassword != null)
         {
             return icePassword;
         }
 
-        List<RtpChannel> channels = getChannels(null);
+        List<RtpChannel> channels = getChannels();
         if (channels == null || channels.isEmpty())
         {
             return null;

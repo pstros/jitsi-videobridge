@@ -30,6 +30,9 @@ import org.jitsi.videobridge.*;
 import org.jitsi.xmpp.component.*;
 import org.jitsi.xmpp.util.*;
 import org.jivesoftware.smack.packet.*;
+import org.jivesoftware.smackx.iqversion.packet.Version;
+import org.jxmpp.jid.*;
+import org.jxmpp.jid.impl.*;
 import org.osgi.framework.*;
 import org.xmpp.component.*;
 import org.xmpp.packet.*;
@@ -84,28 +87,6 @@ public class ComponentImpl
     }
 
     /**
-     * Logs a specific <tt>String</tt> at debug level.
-     *
-     * @param s the <tt>String</tt> to log at debug level
-     */
-    private static void logd(String s)
-    {
-        if ( logger.isDebugEnabled() ) {
-            logger.debug(s);
-        }
-    }
-
-    /**
-     * Logs a specific <tt>Throwable</tt> at error level.
-     *
-     * @param t the <tt>Throwable</tt> to log at error level
-     */
-    private static void loge(Throwable t)
-    {
-        t.printStackTrace(System.err);
-    }
-
-    /**
      * The <tt>BundleContext</tt> in which this instance has been started as an
      * OSGi bundle.
      */
@@ -152,8 +133,7 @@ public class ComponentImpl
                             .URN_XMPP_JINGLE_ICE_UDP_1,
                         ProtocolProviderServiceJabberImpl
                             .URN_XMPP_JINGLE_RAW_UDP_0,
-                        ProtocolProviderServiceJabberImpl
-                            .URN_XMPP_IQ_VERSION
+                        Version.NAMESPACE
                     };
     }
 
@@ -270,7 +250,10 @@ public class ComponentImpl
     {
         try
         {
-            logd("RECV: " + iq.toXML());
+            if (logger.isDebugEnabled())
+            {
+                logger.debug("RECV: " + iq.toXML());
+            }
 
             org.jivesoftware.smack.packet.IQ smackIQ = IQUtils.convert(iq);
             // Failed to convert to Smack IQ ?
@@ -305,14 +288,21 @@ public class ComponentImpl
             {
                 resultIQ = IQUtils.convert(resultSmackIQ);
 
-                logd("SENT: " + resultIQ.toXML());
+                if (logger.isDebugEnabled())
+                {
+                    logger.debug("SENT: " + resultIQ.toXML());
+                }
             }
 
             return resultIQ;
         }
         catch (Exception e)
         {
-            loge(e);
+            logger.error(
+                "Failed to handle IQ with id="
+                    + (iq == null ? "null" : iq.getID()),
+                e);
+
             throw e;
         }
     }
@@ -339,19 +329,19 @@ public class ComponentImpl
         {
             org.jivesoftware.smack.packet.IQ.Type type = iq.getType();
 
-            if (org.jivesoftware.smack.packet.IQ.Type.GET.equals(type)
-                    || org.jivesoftware.smack.packet.IQ.Type.SET.equals(type))
+            if (org.jivesoftware.smack.packet.IQ.Type.get.equals(type)
+                    || org.jivesoftware.smack.packet.IQ.Type.set.equals(type))
             {
                 responseIQ = handleIQRequest(iq);
                 if (responseIQ != null)
                 {
                     responseIQ.setFrom(iq.getTo());
-                    responseIQ.setPacketID(iq.getPacketID());
+                    responseIQ.setStanzaId(iq.getStanzaId());
                     responseIQ.setTo(iq.getFrom());
                 }
             }
-            else if (org.jivesoftware.smack.packet.IQ.Type.ERROR.equals(type)
-                    || org.jivesoftware.smack.packet.IQ.Type.RESULT.equals(
+            else if (org.jivesoftware.smack.packet.IQ.Type.error.equals(type)
+                    || org.jivesoftware.smack.packet.IQ.Type.result.equals(
                             type))
             {
                 handleIQResponse(iq);
@@ -371,8 +361,9 @@ public class ComponentImpl
         }
         catch (Exception e)
         {
-            logd("An error occurred while trying to handle error IQ.");
-            loge(e);
+            logger.error(
+                "An error occurred while trying to handle an 'error' IQ.",
+                e);
         }
     }
 
@@ -406,11 +397,12 @@ public class ComponentImpl
         // based on the org.jivesoftware.smack.packet.IQ runtime type (of their
         // child element) and forwarded to specialized Videobridge methods for
         // convenience.
-        if (request instanceof org.jivesoftware.smackx.packet.Version)
+        if (request instanceof org.jivesoftware.smackx.iqversion.packet.Version)
         {
             return
                 handleVersionIQ(
-                        (org.jivesoftware.smackx.packet.Version) request);
+                        (org.jivesoftware.smackx.iqversion.packet.Version)
+                                request);
         }
 
         Videobridge videobridge = getVideobridge();
@@ -418,7 +410,7 @@ public class ComponentImpl
         {
             return IQUtils.createError(
                     request,
-                    XMPPError.Condition.interna_server_error,
+                    XMPPError.Condition.internal_server_error,
                     "No Videobridge service is running");
         }
 
@@ -454,14 +446,14 @@ public class ComponentImpl
      * represents the response to the specified request.
      */
     private org.jivesoftware.smack.packet.IQ handleVersionIQ(
-            org.jivesoftware.smackx.packet.Version versionRequest)
+            org.jivesoftware.smackx.iqversion.packet.Version versionRequest)
     {
         VersionService versionService = getVersionService();
         if (versionService == null)
         {
             return org.jivesoftware.smack.packet.IQ.createErrorResponse(
                 versionRequest,
-                new XMPPError(XMPPError.Condition.service_unavailable));
+                XMPPError.getBuilder(XMPPError.Condition.service_unavailable));
         }
 
         org.jitsi.service.version.Version
@@ -471,22 +463,22 @@ public class ComponentImpl
         {
             return org.jivesoftware.smack.packet.IQ.createErrorResponse(
                 versionRequest,
-                new XMPPError(XMPPError.Condition.interna_server_error));
+                XMPPError.getBuilder(XMPPError.Condition.internal_server_error));
         }
 
         // send packet
-        org.jivesoftware.smackx.packet.Version versionResult =
-            new org.jivesoftware.smackx.packet.Version();
+        org.jivesoftware.smackx.iqversion.packet.Version versionResult =
+            new org.jivesoftware.smackx.iqversion.packet.Version(
+                    currentVersion.getApplicationName(),
+                    currentVersion.toString(),
+                    System.getProperty("os.name")
+            );
 
         // to, from and packetId are set by the caller.
         // versionResult.setTo(versionRequest.getFrom());
         // versionResult.setFrom(versionRequest.getTo());
         // versionResult.setPacketID(versionRequest.getPacketID());
-        versionResult.setType(org.jivesoftware.smack.packet.IQ.Type.RESULT);
-
-        versionResult.setName(currentVersion.getApplicationName());
-        versionResult.setVersion(currentVersion.toString());
-        versionResult.setOs(System.getProperty("os.name"));
+        versionResult.setType(org.jivesoftware.smack.packet.IQ.Type.result);
 
         return versionResult;
     }
@@ -518,8 +510,9 @@ public class ComponentImpl
         }
         catch (Exception e)
         {
-            logd("An error occurred while trying to handle result IQ.");
-            loge(e);
+            logger.error(
+                "An error occurred while trying to handle a 'result' IQ.",
+                e);
         }
     }
 
@@ -594,25 +587,31 @@ public class ComponentImpl
              * value of the from property of the Packet must not be null;
              * otherwise, an IllegalArgumentException will be thrown.
              */
-            String from = iq.getFrom();
+            Jid from = iq.getFrom();
 
             if ((from == null) || (from.length() == 0))
             {
                 JID fromJID = getJID();
 
                 if (fromJID != null)
-                    iq.setFrom(fromJID.toString());
+                    iq.setFrom(JidCreate.from(fromJID.toString()));
             }
 
             Packet packet = IQUtils.convert(iq);
 
             send(packet);
 
-            logd("SENT: " + packet.toXML());
+            if (logger.isDebugEnabled())
+            {
+                logger.debug("SENT: " + packet.toXML());
+            }
         }
         catch (Exception e)
         {
-            loge(e);
+            logger.error(
+                "Failed to send an IQ with id="
+                    + (iq == null ? "null" : iq.getStanzaId()),
+                e);
             throw e;
         }
     }

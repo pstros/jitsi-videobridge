@@ -19,7 +19,7 @@ Implementation
 		<td>GET</td>
 		<td>/colibri/conferences</td>
 		<td>
-			200 OK with a JSON array/list of JSON objects which represent conferences with id only.<br /> 
+			200 OK with a JSON array/list of JSON objects which represent conferences with <code>id</code> only.<br />
 			For example: 
 <pre>
 [ 
@@ -32,7 +32,7 @@ Implementation
 		<td>POST</td>
 		<td>/colibri/conferences</td>
 		<td>
-			200 OK with a JSON object which represents the created conference if the request was with Content-Type: application/json and was a JSON object which represented a conference without id and, optionally, with contents and channels without ids. <br />
+			200 OK with a JSON object which represents the created conference if the request was with <code>Content-Type: application/json</code> and was a JSON object which represented a conference without <code>id</code> and, optionally, with contents and channels without <code>id</code>s. <br />
 			For example, a request could look like:
 			<pre>
 { 
@@ -75,15 +75,15 @@ The respective response could look like:
  			} 
 		] 
 }</pre>
-		</td>
-	</tr>
-	<tr>
+</td>
+</tr>
+<tr>
 		<td>GET</td>
 		<td>/colibri/conferences{id}</td>
 		<td>
-			200 OK with a JSON object which represents the conference with the specified id. <br />
+			200 OK with a JSON object which represents the conference with the specified <code>id</code>. <br />
 			For example: 
-			<pre>
+<pre>
 { 
 	"id" : "{id}", 
 	"contents" : 
@@ -114,7 +114,7 @@ The respective response could look like:
 		<td>PATCH</td>
 		<td>/colibri/conferences{id}</td>
 		<td>
-			200 OK with a JSON object which represents the modified conference if the request was with ```Content-Type: application/json``` and was a JSON object which represented a conference without ```id``` or with the specified ```id``` and, optionally, with contents and channels with or without ```id```s.
+			200 OK with a JSON object which represents the modified conference if the request was with <code>Content-Type: application/json</code> and was a JSON object which represented a conference without <code>id</code> or with the specified <code>id</code> and, optionally, with contents and channels with or without <code>id</code>s.
 		</td>
 	</tr>
 	<tr>
@@ -124,18 +124,18 @@ The respective response could look like:
 		200 OK with a JSON object which represents the statistics report.
 <pre>
 {
-"cpu_usage":"0.03015",
-"used_memory":3732,
-"rtp_loss":"0",
-"bit_rate_download":"0",
-"audiochannels":0,
-"bit_rate_upload":"0",
-"conferences":0,
-"participants":0,
-"current_timestamp":"2014-08-14 23:26:14.782",
-"threads":17,
-"total_memory":4051,
-"videochannels":0
+    "cpu_usage":"0.03015",
+    "used_memory":3732,
+    "rtp_loss":"0",
+    "bit_rate_download":"0",
+    "audiochannels":0,
+    "bit_rate_upload":"0",
+    "conferences":0,
+    "participants":0,
+    "current_timestamp":"2014-08-14 23:26:14.782",
+    "threads":17,
+    "total_memory":4051,
+    "videochannels":0
 }</pre>
 		(Make sure <a href="using_statistics.md#configuration">statistics are enabled</a>.)
 		</td>
@@ -367,9 +367,8 @@ Post "[]" to <bridge_base_url>/colibri/conferences/
               "clockrate": 48000,
               "channels": 2,
               "parameters": {
-                "fmtp": [
-                  "111 minptime=10; useinbandfec=1"
-                ]
+                "minptime": 10,
+                "useinbandfec": 1
               }
             }
           ],
@@ -397,7 +396,12 @@ Post "[]" to <bridge_base_url>/colibri/conferences/
           "channel-bundle-id": "9f537ebb-1c2a-4ee9-9940-373304f9b260",
           "rtp-level-relay-type": "translator",
           "ssrc-groups": [
-            
+          {
+            "semantics": "FID",
+            "sources": [
+              2,
+              3
+            ]}
           ],
           "payload-types": [
             {
@@ -405,30 +409,42 @@ Post "[]" to <bridge_base_url>/colibri/conferences/
               "name": "H264",
               "clockrate": 90000,
               "channels": 0,
-              "parameters": {
-                "rtcp-fb": [
-                  "127 ccm fir",
-                  "127 nack",
-                  "127 nack pli"
-                ]
-              }
+              "parameters": {},
+              "rtcp-fbs": [ {
+                "type": "ccm",
+                "subtype": "fir"
+              }, {
+                "type": "nack"
+              }, {
+                "type": "nack",
+                "subtype": "pli"
+              } ]
             },
             {
               "id": 100,
               "name": "VP8",
               "clockrate": 90000,
               "channels": 0,
-              "parameters": {
-                "rtcp-fb": [
-                  "100 ccm fir",
-                  "100 nack",
-                  "100 goog-remb"
-                ]
-              }
+              "parameters": {},
+              "rtcp-fbs": [ {
+                "type": "ccm",
+                "subtype": "fir"
+              }, {
+                "type": "nack"
+              }, {
+                "type": "goog-remb"
+              } ]
             }
           ],
           "rtp-hdrexts": [
-            
+            {
+              "id": 2,
+              "uri": "urn:ietf:params:rtp-hdrext:toffset"
+            },
+            {
+              "id": 3,
+              "uri": "http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time"
+            }
           ]
         }
       ]
