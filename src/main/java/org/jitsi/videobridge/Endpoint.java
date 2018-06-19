@@ -15,17 +15,14 @@
  */
 package org.jitsi.videobridge;
 
-import java.io.*;
-import java.lang.ref.*;
-import java.util.*;
-
-import org.jitsi.service.configuration.*;
-import org.jitsi.service.libjitsi.*;
-import org.jitsi.service.neomedia.*;
 import org.jitsi.util.*;
-import org.jitsi.util.event.*;
-import org.json.simple.*;
-import org.json.simple.parser.*;
+import org.jitsi.videobridge.rest.*;
+
+import java.io.*;
+import java.util.*;
+import java.util.concurrent.atomic.*;
+
+import static org.jitsi.videobridge.EndpointMessageBuilder.*;
 
 /**
  * Represents an endpoint of a participant in a <tt>Conference</tt>.
@@ -36,16 +33,8 @@ import org.json.simple.parser.*;
  * @author George Politis
  */
 public class Endpoint
-    extends PropertyChangeNotifier
-    implements WebRtcDataStream.DataCallback
+    extends AbstractEndpoint
 {
-    /**
-     * The name of the <tt>Endpoint</tt> property <tt>channels</tt> which lists
-     * the <tt>RtpChannel</tt>s associated with the <tt>Endpoint</tt>.
-     */
-    public static final String CHANNELS_PROPERTY_NAME
-        = Endpoint.class.getName() + ".channels";
-
     /**
      * The {@link Logger} used by the {@link Endpoint} class to print debug
      * information.
@@ -61,126 +50,53 @@ public class Endpoint
         = Endpoint.class.getName() + ".pinnedEndpoints";
 
     /**
-     * The name of the <tt>Endpoint</tt> property <tt>sctpConnection</tt> which
-     * specifies the <tt>SctpConnection</tt> associated with the
-     * <tt>Endpoint</tt>.
-     */
-    public static final String SCTP_CONNECTION_PROPERTY_NAME
-        = Endpoint.class.getName() + ".sctpConnection";
-
-    /**
      * The name of the <tt>Endpoint</tt> property <tt>selectedEndpoint</tt>
      * which specifies the JID of the currently selected <tt>Endpoint</tt> of
      * this <tt>Endpoint</tt>.
      */
-    public static final String SELECTED_ENDPOINT_PROPERTY_NAME
-        = Endpoint.class.getName() + ".selectedEndpoint";
-
-    /**
-     * The {@link Videobridge#COLIBRI_CLASS} value indicating a
-     * {@code SelectedEndpointChangedEvent}.
-     */
-    private static final String COLIBRI_CLASS_SELECTED_ENDPOINT_CHANGED
-        = "SelectedEndpointChangedEvent";
-
-    /**
-     * The {@link Videobridge#COLIBRI_CLASS} value indicating a
-     * {@code PinnedEndpointChangedEvent}.
-     */
-    private static final String COLIBRI_CLASS_PINNED_ENDPOINT_CHANGED
-        = "PinnedEndpointChangedEvent";
-
-    /**
-     * The {@link Videobridge#COLIBRI_CLASS} value indicating a
-     * {@code PinnedEndpointsChangedEvent}.
-     */
-    private static final String COLIBRI_CLASS_PINNED_ENDPOINTS_CHANGED
-        = "PinnedEndpointsChangedEvent";
-
-    /**
-     * The {@link Videobridge#COLIBRI_CLASS} value indicating a
-     * {@code ClientHello} message.
-     */
-    private static final String COLIBRI_CLASS_CLIENT_HELLO
-        = "ClientHello";
-
-    /**
-     * The {@link Videobridge#COLIBRI_CLASS} value indicating a
-     * {@code EndpointMessage}.
-     */
-    private static final String COLIBRI_CLASS_ENDPOINT_MESSAGE
-        = "EndpointMessage";
+    public static final String SELECTED_ENDPOINTS_PROPERTY_NAME
+        = Endpoint.class.getName() + ".selectedEndpoints";
 
     /**
      * Configuration property for number of streams to cache
      */
+    @Deprecated
     public final static String ENABLE_LIPSYNC_HACK_PNAME
         = Endpoint.class.getName() + ".ENABLE_LIPSYNC_HACK";
 
     /**
-     * The list of <tt>Channel</tt>s associated with this <tt>Endpoint</tt>.
+     * The set of IDs of the pinned endpoints of this {@code Endpoint}.
      */
-    private final List<WeakReference<RtpChannel>> channels = new LinkedList<>();
+    private Set<String> pinnedEndpoints = new HashSet<>();
 
     /**
-     * The object that implements a hack for LS for this {@link Endpoint}.
-     */
-    private final LipSyncHack lipSyncHack;
-
-    /**
-     * The (human readable) display name of this <tt>Endpoint</tt>.
-     */
-    private String displayName;
-
-    /**
-     * The indicator which determines whether {@link #expire()} has been called
-     * on this <tt>Endpoint</tt>.
-     */
-    private boolean expired = false;
-
-    /**
-     * The (unique) identifier/ID of the endpoint of a participant in a
-     * <tt>Conference</tt>.
-     */
-    private final String id;
-
-    /**
-     * The <tt>pinnedEndpointID</tt> SyncRoot.
-     */
-    private final Object pinnedEndpointSyncRoot = new Object();
-
-    /**
-     * SCTP connection bound to this endpoint.
-     */
-    private WeakReference<SctpConnection> sctpConnection
-        = new WeakReference<>(null);
-
-    /**
-     * The <tt>selectedEndpointID</tt> SyncRoot.
-     */
-    private final Object selectedEndpointSyncRoot = new Object();
-
-    /**
-     * A reference to the <tt>Conference</tt> this <tt>Endpoint</tt> belongs to.
-     */
-    private final Conference conference;
-
-    /**
-     * The list of IDs of the pinned endpoints of this {@code endpoint}.
-     */
-    private List<String> pinnedEndpoints = new LinkedList<>();
-
-    /**
-     * The list of currently selected <tt>Endpoint</tt>s at this
+     * The set of currently selected <tt>Endpoint</tt>s at this
      * <tt>Endpoint</tt>.
      */
-    private Set<Endpoint> selectedEndpoints = new HashSet<>();
+    private Set<String> selectedEndpoints = new HashSet<>();
 
     /**
      * The {@link Logger} to be used by this instance to print debug
      * information.
      */
     private final Logger logger;
+
+    /**
+     * The password of the ICE Agent associated with this endpoint: note that
+     * without bundle an endpoint might have multiple channels with different
+     * ICE Agents. In this case one of the channels will be chosen (in an
+     * unspecified way).
+     *
+     * Initialized lazily.
+     */
+    private String icePassword;
+
+    private final EndpointMessageTransport messageTransport;
+
+    /**
+     * A count of how many endpoints have 'selected' this endpoint
+     */
+    private AtomicInteger selectedCount = new AtomicInteger(0);
 
     /**
      * Initializes a new <tt>Endpoint</tt> instance with a specific (unique)
@@ -192,719 +108,89 @@ public class Endpoint
      */
     public Endpoint(String id, Conference conference)
     {
-        Objects.requireNonNull(id, "id");
-        Objects.requireNonNull(conference, "conference");
+        super(conference, id);
 
-        this.conference = conference;
-        this.id = id;
+        messageTransport = new EndpointMessageTransport(this);
         this.logger = Logger.getLogger(classLogger, conference.getLogger());
-
-        ConfigurationService cfg = LibJitsi.getConfigurationService();
-
-        this.lipSyncHack
-            = cfg != null && cfg.getBoolean(ENABLE_LIPSYNC_HACK_PNAME, false)
-                ? new LipSyncHack(this) : null;
     }
 
     /**
-     * Adds a specific <tt>Channel</tt> to the list of <tt>Channel</tt>s
-     * associated with this <tt>Endpoint</tt>.
-     *
-     * @param channel the <tt>Channel</tt> to add to the list of
-     * <tt>Channel</tt>s associated with this <tt>Endpoint</tt>
-     * @return <tt>true</tt> if the list of <tt>Channel</tt>s associated with
-     * this <tt>Endpoint</tt> changed as a result of the method invocation;
-     * otherwise, <tt>false</tt>
+     * {@inheritDoc}
      */
-    public boolean addChannel(RtpChannel channel)
+    @Override
+    public EndpointMessageTransport getMessageTransport()
     {
-        if (channel == null)
-            throw new NullPointerException("channel");
-
-        // The expire state of Channel is final. Adding an expired Channel to
-        // an Endpoint is a no-op.
-        if (channel.isExpired())
-            return false;
-
-        boolean added = false;
-        boolean removed = false;
-
-        synchronized (channels)
-        {
-            boolean add = true;
-
-            for (Iterator<WeakReference<RtpChannel>> i = channels.iterator();
-                    i.hasNext();)
-            {
-                RtpChannel c = i.next().get();
-
-                if (c == null)
-                {
-                    i.remove();
-                    removed = true;
-                }
-                else if (c.equals(channel))
-                {
-                    add = false;
-                }
-                else if (c.isExpired())
-                {
-                    i.remove();
-                    removed = true;
-                }
-            }
-            if (add)
-            {
-                channels.add(new WeakReference<>(channel));
-                added = true;
-            }
-        }
-
-        if (added || removed)
-            firePropertyChange(CHANNELS_PROPERTY_NAME, null, null);
-
-        return added;
+        return messageTransport;
     }
 
     /**
-     * Notifies this <tt>Endpoint</tt> that an associated <tt>Channel</tt> has
-     * received or measured a new audio level for a specific (contributing)
-     * synchronization source identifier/SSRC.
-     *
-     * @param channel the <tt>Channel</tt> which has received or measured the
-     * specified <tt>audioLevel</tt> for the specified <tt>ssrc</tt>
-     * @param ssrc the synchronization source identifier/SSRC of the RTP stream
-     * received within the specified <tt>channel</tt> for which the specified
-     * <tt>audioLevel</tt> was received or measured
-     * @param audioLevel the audio level which was received or measured for the
-     * specified <tt>ssrc</tt> received within the specified <tt>channel</tt>
-     */
-    void audioLevelChanged(Channel channel, long ssrc, int audioLevel)
-    {
-    }
-
-    /**
-     * Gets the number of <tt>RtpChannel</tt>s of this <tt>Endpoint</tt> which,
-     * optionally, are of a specific <tt>MediaType</tt>.
-     *
-     * @param mediaType the <tt>MediaType</tt> of the <tt>RtpChannel</tt>s to
-     * count or <tt>null</tt> to count all <tt>RtpChannel</tt>s of this
-     * <tt>Endpoint</tt>
-     * @return the number of <tt>RtpChannel</tt>s of this <tt>Endpoint</tt>
-     * which, optionally, are of the specified <tt>mediaType</tt>
-     */
-    public int getChannelCount(MediaType mediaType)
-    {
-        return getChannels(mediaType).size();
-    }
-
-    /**
-     * Gets a <tt>List</tt> with the channels of this <tt>Endpoint</tt> with
-     * a particular <tt>MediaType</tt>.
-     *
-     * @param mediaType the <tt>MediaType</tt>.
-     * @return a <tt>List</tt> with the channels of this <tt>Endpoint</tt> with
-     * a particular <tt>MediaType</tt>.
-     */
-    public List<RtpChannel> getChannels(MediaType mediaType)
-    {
-        boolean removed = false;
-        List<RtpChannel> channels = new LinkedList<>();
-
-        synchronized (this.channels)
-        {
-            for (Iterator<WeakReference<RtpChannel>> i
-                        = this.channels.iterator();
-                    i.hasNext();)
-            {
-                RtpChannel c = i.next().get();
-
-                if ((c == null) || c.isExpired())
-                {
-                    i.remove();
-                    removed = true;
-                }
-                else if ((mediaType == null)
-                        || mediaType.equals(c.getContent().getMediaType()))
-                {
-                    channels.add(c);
-                }
-            }
-        }
-
-        if (removed)
-            firePropertyChange(CHANNELS_PROPERTY_NAME, null, null);
-
-        return channels;
-    }
-
-    /**
-     * Returns the display name of this <tt>Endpoint</tt>.
-     *
-     * @return the display name of this <tt>Endpoint</tt>.
-     */
-    public String getDisplayName()
-    {
-        return displayName;
-    }
-
-    /**
-     * Gets the (unique) identifier/ID of this instance.
-     *
-     * @return the (unique) identifier/ID of this instance
-     */
-    public final String getID()
-    {
-        return id;
-    }
-
-    /**
-     * Returns an <tt>SctpConnection</tt> bound to this <tt>Endpoint</tt>.
+     * Returns this {@link Endpoint}'s {@link SctpConnection}, if any. Note
+     * that this should NOT be used for sending messages -- use the abstract
+     * {@link EndpointMessageTransport} instead.
      *
      * @return an <tt>SctpConnection</tt> bound to this <tt>Endpoint</tt> or
      * <tt>null</tt> otherwise.
      */
     public SctpConnection getSctpConnection()
     {
-        return sctpConnection.get();
+        return getMessageTransport().getSctpConnection();
     }
 
     /**
-     * Gets the object that implements a hack for LS for this {@link Endpoint}.
-     *
-     * @return the object that implements a hack for LS for this
-     * {@link Endpoint}.
+     * @return the {@link Set} of selected endpoints, represented as a set of
+     * endpoint IDs.
      */
-    public LipSyncHack getLipSyncHack()
+    @Override
+    public Set<String> getSelectedEndpoints()
     {
-        return lipSyncHack;
+        return selectedEndpoints;
     }
 
     /**
-     * Gets the currently selected <tt>Endpoint</tt>s at this <tt>Endpoint</tt>
-     *
-     * @return the currently selected <tt>Endpoint</tt>s at this
-     * <tt>Endpoint</tt>.
+     * @return the {@link Set} of pinned endpoints, represented as a set of
+     * endpoint IDs.
      */
-    public Set<Endpoint> getSelectedEndpoints()
-    {
-        Set<Endpoint> result = new HashSet<>();
-        for (Endpoint endpoint : selectedEndpoints)
-        {
-            if (!endpoint.isExpired())
-            {
-                result.add(endpoint);
-            }
-        }
-
-        return result;
-    }
-
-
-    /**
-     * @return the list of pinned endpoints, represented as a list of endpoint
-     * IDs.
-     */
-    public List<String> getPinnedEndpoints()
+    @Override
+    public Set<String> getPinnedEndpoints()
     {
         return pinnedEndpoints;
     }
 
-    /**
-     * Gets the <tt>Conference</tt> to which this <tt>Endpoint</tt> belongs.
-     *
-     * @return the <tt>Conference</tt> to which this <tt>Endpoint</tt> belongs.
-     */
-    public Conference getConference()
-    {
-        return this.conference;
-    }
-
-    /**
-     * Checks whether or not this <tt>Endpoint</tt> is considered "expired"
-     * ({@link #expire()} method has been called).
-     *
-     * @return <tt>true</tt> if this instance is "expired" or <tt>false</tt>
-     * otherwise.
-     */
-    public boolean isExpired()
-    {
-        return expired;
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    @Override
-    public void onBinaryData(WebRtcDataStream src, byte[] data)
-    {
-    }
-
-    /**
-     * Notifies this {@code Endpoint} that a {@code ClientHello} has been
-     * received by the associated {@code SctpConnection}.
-     *
-     * @param src the {@code WebRtcDataStream} by which {@code jsonObject} has
-     * been received
-     * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
-     * {@code ClientHello} which has been received by the associated
-     * {@code SctpConnection}
-     */
-    private void onClientHello(WebRtcDataStream src, JSONObject jsonObject)
-    {
-        // ClientHello was introduced for (functional) testing purposes. It
-        // triggers a ServerHello (response) from Videobridge. The exchange
-        // reveals (to the client) that the WebRTC data channel between the
-        // (remote) endpoint and the Videobridge is operational.
-        try
-        {
-            src.sendString("{\"colibriClass\":\"ServerHello\"}");
-        }
-        catch (IOException ioex)
-        {
-            logger.error(
-                    "Failed to respond to a ClientHello over the WebRTC data"
-                        + " channel of endpoint " + getID() + "!",
-                    ioex);
-        }
-    }
-
-    /**
-     * Notifies this {@code Endpoint} that a specific JSON object has been
-     * received by the associated {@code SctpConnection}.
-     *
-     * @param src the {@code WebRtcDataStream} by which the specified
-     * {@code jsonObject} has been received
-     * @param jsonObject the JSON data received by {@code src}
-     * @param colibriClass the non-{@code null} value of the mandatory JSON
-     * property {@link Videobridge#COLIBRI_CLASS} required of all JSON objects
-     * received by the associated {@code SctpConnection}
-     */
-    private void onJSONData(
-            WebRtcDataStream src,
-            JSONObject jsonObject,
-            Object colibriClass)
-    {
-        if (COLIBRI_CLASS_SELECTED_ENDPOINT_CHANGED.equals(colibriClass))
-            onSelectedEndpointChangedEvent(src, jsonObject);
-        else if (COLIBRI_CLASS_PINNED_ENDPOINT_CHANGED.equals(colibriClass))
-            onPinnedEndpointChangedEvent(src, jsonObject);
-        else if (COLIBRI_CLASS_PINNED_ENDPOINTS_CHANGED.equals(colibriClass))
-            onPinnedEndpointsChangedEvent(src, jsonObject);
-        else if (COLIBRI_CLASS_CLIENT_HELLO.equals(colibriClass))
-            onClientHello(src, jsonObject);
-        else if (COLIBRI_CLASS_ENDPOINT_MESSAGE.equals(colibriClass))
-            onClientEndpointMessage(src, jsonObject);
-    }
-
-    /**
-     * Handles an opaque message from this {@code Endpoint} that should be
-     * forwarded to either: a) another client in this conference (1:1 
-     * message) or b) all other clients in this conference (broadcast message)
-     *
-     * @param src the {@link WebRtcDataStream) by which {@code jsonObject} has
-     * been received
-     * @param jsonObject the JSON object with 
-     * {@link Videobridge#COLIBRI_CLASS} EndpointMessage which has been 
-     * received by the associated {@code SctpConnection}
-     *
-     * EndpointMessage definition:
-     * 'to': If the 'to' field contains the endpoint id of another endpoint 
-     * in this conference, the message will be treated as a 1:1 message and 
-     * forwarded just to that endpoint.  If the 'to' field is an empty 
-     * string, the message will be treated as a broadcast and sent to all other
-     * endpoints in this conference.
-     * 'msgPayload': An opaque payload.  The bridge does not need to know or 
-     * care what is contained in the 'msgPayload' field, it will just forward 
-     * it blindly.
-     *
-     * NOTE: This message is designed to allow endpoints to pass their own 
-     * application-specific messaging to one another without requiring the 
-     * bridge to know of or understand every message type.  These messages 
-     * will be forwarded by the bridge using the same DataChannel as other 
-     * jitsi messages (e.g. active speaker and last-n notifications).  
-     * It is not recommended to send high-volume message traffic on this 
-     * channel (e.g. file transfer), such that it may interfere with other 
-     * jitsi-messages.
-     */
-    @SuppressWarnings("unchecked")
-    private void onClientEndpointMessage(
-            WebRtcDataStream src,
-            JSONObject jsonObject)
-    {
-        String to = (String)jsonObject.get("to");
-        jsonObject.put("from", getID());
-        if (conference.isExpired())
-        {
-            logger.warn(
-                "Unable to send EndpointMessage - the conference has expired");
-            return;
-        }
-
-        if ("".equals(to))
-        {
-            // Broadcast message
-            List<Endpoint> endpointSubset = new ArrayList<>();
-            for (Endpoint endpoint : conference.getEndpoints())
-            {
-                if (!endpoint.getID().equalsIgnoreCase(getID()))
-                {
-                    endpointSubset.add(endpoint);
-                }
-            }
-            conference.sendMessageOnDataChannels(
-                    jsonObject.toString(), endpointSubset);
-        }
-        else
-        {
-            // 1:1 message
-            Endpoint ep = conference.getEndpoint(to);
-            if (ep != null)
-            {
-                List<Endpoint> endpointSubset = new ArrayList<>();
-                endpointSubset.add(ep);
-                conference.sendMessageOnDataChannels(
-                        jsonObject.toString(), endpointSubset);
-            }
-            else
-            {
-                logger.warn(
-                    "Unable to find endpoint " + to
-                    + " to send EndpointMessage");
-            }
-        }
-    }
-
-    /**
-     * Notifies this {@code Endpoint} that a {@code PinnedEndpointChangedEvent}
-     * has been received by the associated {@code SctpConnection}.
-     *
-     * @param src the {@code WebRtcDataStream} by which {@code jsonObject} has
-     * been received
-     * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
-     * {@code PinnedEndpointChangedEvent} which has been received by the
-     * associated {@code SctpConnection}
-     */
-    private void onPinnedEndpointChangedEvent(
-            WebRtcDataStream src,
-            JSONObject jsonObject)
-    {
-        // Find the new pinned endpoint.
-        String newPinnedEndpointID = (String) jsonObject.get("pinnedEndpoint");
-
-        if (logger.isDebugEnabled())
-        {
-            StringCompiler sc = new StringCompiler();
-            sc.bind("pinnedId", newPinnedEndpointID);
-            sc.bind("this", this);
-            logger.debug(sc.c(
-                    "Endpoint {this.id} notified us that it has pinned"
-                            + " {pinnedId}."));
-        }
-
-        List<String> newPinnedIDList = Collections.EMPTY_LIST;
-        if (newPinnedEndpointID != null && !"".equals(newPinnedEndpointID))
-        {
-            newPinnedIDList = Collections.singletonList(newPinnedEndpointID);
-        }
-
-        pinnedEndpointsChanged(newPinnedIDList);
-    }
-
-    /**
-     * Notifies this {@code Endpoint} that a {@code PinnedEndpointsChangedEvent}
-     * has been received by the associated {@code SctpConnection}.
-     *
-     * @param src the {@code WebRtcDataStream} by which {@code jsonObject} has
-     * been received
-     * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
-     * {@code PinnedEndpointChangedEvent} which has been received by the
-     * associated {@code SctpConnection}
-     */
-    private void onPinnedEndpointsChangedEvent(
-            WebRtcDataStream src,
-            JSONObject jsonObject)
-    {
-        // Find the new pinned endpoint.
-        Object o = jsonObject.get("pinnedEndpoints");
-        if (!(o instanceof JSONArray))
-        {
-            logger.warn("Received invalid or unexpected JSON: " + jsonObject);
-            return;
-        }
-
-        JSONArray jsonArray = (JSONArray) o;
-        List<String> newPinnedEndpoints = new LinkedList<>();
-        for (Object endpointId : jsonArray)
-        {
-            if (endpointId != null && endpointId instanceof String)
-            {
-                newPinnedEndpoints.add((String)endpointId);
-            }
-        }
-
-        if (logger.isDebugEnabled())
-        {
-            StringCompiler sc = new StringCompiler();
-            sc.bind("pinned", newPinnedEndpoints);
-            sc.bind("this", this);
-            logger.debug(sc.c(
-                    "Endpoint {this.id} notified us that it has pinned"
-                            + " {pinned}."));
-        }
-
-        pinnedEndpointsChanged(newPinnedEndpoints);
-    }
-
-    private void pinnedEndpointsChanged(List<String> pinnedEndpoints)
+    void pinnedEndpointsChanged(Set<String> newPinnedEndpoints)
     {
         // Check if that's different to what we think the pinned endpoints are.
-        boolean changed;
-        synchronized (pinnedEndpointSyncRoot)
+        Set<String> oldPinnedEndpoints = this.pinnedEndpoints;
+        if (!oldPinnedEndpoints.equals(newPinnedEndpoints))
         {
-            changed = pinnedEndpoints.size() != this.pinnedEndpoints.size();
-            if (!changed)
-            {
-                for (int i = 0; i < pinnedEndpoints.size(); i++)
-                {
-                    if (!pinnedEndpoints.get(i).
-                            equals(this.pinnedEndpoints.get(i)))
-                    {
-                        changed = true;
-                        break;
-                    }
-                }
-            }
+            this.pinnedEndpoints = newPinnedEndpoints;
 
-            if (changed)
-            {
-                List<String> oldPinnedEndpoints = this.pinnedEndpoints;
-                this.pinnedEndpoints = pinnedEndpoints;
-
-                if (logger.isDebugEnabled())
-                {
-                    StringCompiler sc = new StringCompiler();
-                    sc.bind("pinned", pinnedEndpoints);
-                    sc.bind("this", this);
-                    logger.debug(sc.c("Endpoint {this.id} pinned {pinned}."));
-                }
-                firePropertyChange(PINNED_ENDPOINTS_PROPERTY_NAME,
-                                   oldPinnedEndpoints, pinnedEndpoints);
-            }
-        }
-    }
-
-    /**
-     * Notifies this {@code Endpoint} that a
-     * {@code SelectedEndpointChangedEvent} has been received by the associated
-     * {@code SctpConnection}.
-     *
-     * @param src the {@code WebRtcDataStream} by which {@code jsonObject} has
-     * been received
-     * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
-     * {@code SelectedEndpointChangedEvent} which has been received by the
-     * associated {@code SctpConnection}
-     */
-    private void onSelectedEndpointChangedEvent(
-            WebRtcDataStream src,
-            JSONObject jsonObject)
-    {
-        List<String> newSelectedEndpointIDs
-                = readSelectedEndpointID(jsonObject);
-
-        if (logger.isDebugEnabled())
-        {
-            StringCompiler sc = new StringCompiler();
-            sc.bind("selectedIds", newSelectedEndpointIDs);
-            sc.bind("this", this);
-            logger.debug(sc.c(
-                    "Endpoint {this.id} notified us that its big screen"
-                        + " displays endpoint {selectedIds}."));
-        }
-
-        Set<Endpoint> newSelectedEndpoints = new HashSet<>();
-
-        if (!newSelectedEndpointIDs.isEmpty() && !conference.isExpired()) {
-            for (String endpointId : newSelectedEndpointIDs) {
-                Endpoint endpoint = conference.getEndpoint(endpointId);
-                if (endpoint != null) {
-                    newSelectedEndpoints.add(endpoint);
-                }
-            }
-        }
-
-        boolean changed;
-        Set<Endpoint> oldSelectedEndpoints = this.getSelectedEndpoints();
-        synchronized (selectedEndpointSyncRoot)
-        {
-            // Compare the collections
-            changed = !(oldSelectedEndpoints.equals(newSelectedEndpoints));
-
-            if (changed)
-            {
-                this.selectedEndpoints = new HashSet<>(newSelectedEndpoints);
-            }
-        }
-
-        // NOTE(gp) This won't guarantee that property change events are fired
-        // in the correct order. We should probably call the
-        // firePropertyChange() method from inside the synchronized _and_ the
-        // underlying PropertyChangeNotifier should have a dedicated events
-        // queue and a thread for firing PropertyChangeEvents from the queue.
-
-        if (changed)
-        {
             if (logger.isDebugEnabled())
             {
-                StringCompiler sc = new StringCompiler();
-                sc.bind("newSelectedEndpoints", newSelectedEndpoints);
-                sc.bind("this", this);
-                logger.debug(sc.c(
-                        "Endpoint {this.id} selected {newSelectedEndpoints}."));
+                logger.debug(getID() + " pinned "
+                    + Arrays.toString(pinnedEndpoints.toArray()));
             }
-            firePropertyChange(SELECTED_ENDPOINT_PROPERTY_NAME,
-                oldSelectedEndpoints, newSelectedEndpoints);
+
+            firePropertyChange(PINNED_ENDPOINTS_PROPERTY_NAME,
+                oldPinnedEndpoints, pinnedEndpoints);
         }
     }
 
-    /**
-     * A helper function that reads the selected endpoint id list from the json
-     * message. Accepts ID list and a single ID
-     *
-     * @param jsonObject The whole message that contains a 'selectedEnpoint'
-     *                   field
-     * @return The list of the IDs or empty list if some problem happened
-     */
-    static private List<String> readSelectedEndpointID(JSONObject jsonObject)
+    void selectedEndpointsChanged(Set<String> newSelectedEndpoints)
     {
-        List<String> selectedEndpointIDs;
-        Object selectedEndpointJsonObject = jsonObject.get("selectedEndpoint");
-
-        if (selectedEndpointJsonObject != null &&
-                selectedEndpointJsonObject instanceof JSONArray)
-        {   // JSONArray is an ArrayList
-            selectedEndpointIDs = (List<String>) selectedEndpointJsonObject;
-        }
-        else if (selectedEndpointJsonObject != null &&
-                selectedEndpointJsonObject instanceof String)
+        // Check if that's different to what we think the pinned endpoints are.
+        Set<String> oldSelectedEndpoints = this.selectedEndpoints;
+        if (!oldSelectedEndpoints.equals(newSelectedEndpoints))
         {
-            selectedEndpointIDs = new ArrayList<>();
-            selectedEndpointIDs.add((String)selectedEndpointJsonObject);
-        }
-        else
-        {   // Unknown type
-            selectedEndpointIDs = new ArrayList<>();
-        }
+            this.selectedEndpoints = newSelectedEndpoints;
 
-        return selectedEndpointIDs;
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    @Override
-    public void onStringData(WebRtcDataStream src, String msg)
-    {
-        Object obj;
-        JSONParser parser = new JSONParser(); // JSONParser is NOT thread-safe.
-
-        try
-        {
-            obj = parser.parse(msg);
-        }
-        catch (ParseException ex)
-        {
-            logger.warn("Malformed JSON received from endpoint " + getID(), ex);
-            obj = null;
-        }
-
-        // We utilize JSONObjects only.
-        if (obj instanceof JSONObject)
-        {
-            JSONObject jsonObject = (JSONObject) obj;
-            // We utilize JSONObjects with colibriClass only.
-            Object colibriClass = jsonObject.get(Videobridge.COLIBRI_CLASS);
-
-            if (colibriClass != null)
+            if (logger.isDebugEnabled())
             {
-                onJSONData(src, jsonObject, colibriClass);
+                logger.debug(getID() + " selected "
+                    + Arrays.toString(selectedEndpoints.toArray()));
             }
-            else
-            {
-                logger.warn(
-                        "Malformed JSON received from endpoint " + getID()
-                            + ". JSON object does not contain the colibriClass"
-                            + " field.");
-            }
-        }
-    }
 
-    /**
-     * Removes a specific <tt>Channel</tt> from the list of <tt>Channel</tt>s
-     * associated with this <tt>Endpoint</tt>.
-     *
-     * @param channel the <tt>Channel</tt> to remove from the list of
-     * <tt>Channel</tt>s associated with this <tt>Endpoint</tt>
-     * @return <tt>true</tt> if the list of <tt>Channel</tt>s associated with
-     * this <tt>Endpoint</tt> changed as a result of the method invocation;
-     * otherwise, <tt>false</tt>
-     */
-    public boolean removeChannel(RtpChannel channel)
-    {
-        if (channel == null)
-            return false;
-
-        boolean removed = false;
-
-        synchronized (channels)
-        {
-            for (Iterator<WeakReference<RtpChannel>> i = channels.iterator();
-                    i.hasNext();)
-            {
-                Channel c = i.next().get();
-
-                if ((c == null) || c.equals(channel) || c.isExpired())
-                {
-                    i.remove();
-                    removed = true;
-                }
-            }
-        }
-
-        if (removed)
-            firePropertyChange(CHANNELS_PROPERTY_NAME, null, null);
-
-        return removed;
-    }
-
-    /**
-     * Notifies this <tt>Endpoint</tt> that its associated
-     * <tt>SctpConnection</tt> has become ready i.e. connected to the remote
-     * peer and operational.
-     *
-     * @param sctpConnection the <tt>SctpConnection</tt> which has become ready
-     * and is the cause of the method invocation
-     */
-    void sctpConnectionReady(SctpConnection sctpConnection)
-    {
-        if (sctpConnection.equals(getSctpConnection())
-                && !sctpConnection.isExpired()
-                && sctpConnection.isReady())
-        {
-            for (RtpChannel channel : getChannels(null))
-                channel.sctpConnectionReady(this);
-
-            WebRtcDataStream dataStream;
-
-            try
-            {
-                dataStream = sctpConnection.getDefaultDataStream();
-                dataStream.setDataCallback(this);
-            }
-            catch (IOException e)
-            {
-                logger.error("Could not get the default data stream.", e);
-            }
+            firePropertyChange(SELECTED_ENDPOINTS_PROPERTY_NAME,
+                oldSelectedEndpoints, selectedEndpoints);
         }
     }
 
@@ -915,57 +201,44 @@ public class Endpoint
      * @param msg message text to send.
      * @throws IOException
      */
-    public void sendMessageOnDataChannel(String msg)
+    @Override
+    public void sendMessage(String msg)
         throws IOException
     {
-        SctpConnection sctpConnection = getSctpConnection();
-        String endpointId = getID();
-
-        if(sctpConnection == null)
+        EndpointMessageTransport messageTransport
+            = getMessageTransport();
+        if (messageTransport != null)
         {
-            logger.warn("No SCTP connection with " + endpointId + ".");
-        }
-        else if(sctpConnection.isReady())
-        {
-            try
-            {
-                WebRtcDataStream dataStream
-                    = sctpConnection.getDefaultDataStream();
-
-                if(dataStream == null)
-                {
-                    logger.warn(
-                            "WebRtc data channel with " + endpointId
-                                + " not opened yet.");
-                }
-                else
-                {
-                    dataStream.sendString(msg);
-                }
-            }
-            catch (IOException e)
-            {
-                // We _don't_ want to silently fail to deliver a message because
-                // some functions of the bridge depends on being able to
-                // reliably deliver a message through data channels.
-                throw e;
-            }
-        }
-        else
-        {
-            logger.warn(
-                    "SCTP connection with " + endpointId + " not ready yet.");
+            messageTransport.sendMessage(msg);
         }
     }
 
     /**
-     * Sets the display name of this <tt>Endpoint</tt>.
-     *
-     * @param displayName the display name to set on this <tt>Endpoint</tt>.
+     * Expires this {@link Endpoint} if it has no channels and no SCTP connection.
      */
-    public void setDisplayName(String displayName)
+    @Override
+    protected void maybeExpire()
     {
-        this.displayName = displayName;
+        if (getSctpConnection() == null && getChannelCount(null) == 0)
+        {
+            expire();
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void expire()
+    {
+        super.expire();
+
+        AbstractEndpointMessageTransport messageTransport
+            = getMessageTransport();
+        if (messageTransport != null)
+        {
+            messageTransport.close();
+        }
     }
 
     /**
@@ -974,25 +247,142 @@ public class Endpoint
      * @param sctpConnection the <tt>SctpConnection</tt> to be bound to this
      * <tt>Endpoint</tt>.
      */
-    public void setSctpConnection(SctpConnection sctpConnection)
+    void setSctpConnection(SctpConnection sctpConnection)
     {
-        Object oldValue = getSctpConnection();
-
-        if (!Objects.equals(oldValue, sctpConnection))
+        EndpointMessageTransport messageTransport
+            = getMessageTransport();
+        if (messageTransport != null)
         {
-            if (oldValue != null && sctpConnection != null)
+            messageTransport.setSctpConnection(sctpConnection);
+        }
+
+        if (getSctpConnection() == null)
+        {
+            maybeExpire();
+        }
+    }
+
+    /**
+     * Checks whether a WebSocket connection with a specific password string
+     * should be accepted for this {@link Endpoint}.
+     * @param password the
+     * @return {@code true} iff the password matches and the WebSocket
+     */
+    public boolean acceptWebSocket(String password)
+    {
+        String icePassword = getIcePassword();
+        if (icePassword == null || !icePassword.equals(password))
+        {
+            logger.warn("Incoming web socket request with an invalid password."
+                            + "Expected: " + icePassword
+                            + ", received " + password);
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Notifies this {@link Endpoint} that a specific {@link ColibriWebSocket}
+     * instance associated with it has connected.
+     * @param ws the {@link ColibriWebSocket} which has connected.
+     */
+    public void onWebSocketConnect(ColibriWebSocket ws)
+    {
+        EndpointMessageTransport messageTransport
+            = getMessageTransport();
+        if (messageTransport != null)
+        {
+            messageTransport.onWebSocketConnect(ws);
+        }
+    }
+
+    /**
+     * Notifies this {@link Endpoint} that a specific {@link ColibriWebSocket}
+     * instance associated with it has been closed.
+     * @param ws the {@link ColibriWebSocket} which has been closed.
+     */
+    public void onWebSocketClose(
+            ColibriWebSocket ws, int statusCode, String reason)
+    {
+        EndpointMessageTransport messageTransport
+            = getMessageTransport();
+        if (messageTransport != null)
+        {
+            messageTransport.onWebSocketClose(ws, statusCode, reason);
+        }
+    }
+
+    /**
+     * Notifies this {@link Endpoint} that a message has been received from a
+     * specific {@link ColibriWebSocket} instance associated with it.
+     * @param ws the {@link ColibriWebSocket} from which a message was received.
+     */
+    public void onWebSocketText(ColibriWebSocket ws, String message)
+    {
+        EndpointMessageTransport messageTransport
+            = getMessageTransport();
+        if (messageTransport != null)
+        {
+            messageTransport.onWebSocketText(ws, message);
+        }
+    }
+
+    /**
+     * @return the password of the ICE Agent associated with this
+     * {@link Endpoint}.
+     */
+    private String getIcePassword()
+    {
+        if (icePassword != null)
+        {
+            return icePassword;
+        }
+
+        List<RtpChannel> channels = getChannels();
+        if (channels == null || channels.isEmpty())
+        {
+            return null;
+        }
+
+        // We just use the first channel, assuming bundle.
+        TransportManager tm = channels.get(0).getTransportManager();
+        if (tm instanceof IceUdpTransportManager)
+        {
+            String password = ((IceUdpTransportManager) tm).getIcePassword();
+            if (password != null)
             {
-                // This is not necessarily invalid, but with the current
-                // codebase it likely indicates a problem. If we start to
-                // actually use it, this warning should be removed.
-                logger.warn("Replacing an Endpoint's SctpConnection.");
+                this.icePassword = password;
+                return password;
             }
+        }
 
-            this.sctpConnection = new WeakReference<>(sctpConnection);
+        return null;
+    }
 
-            firePropertyChange(
-                    SCTP_CONNECTION_PROPERTY_NAME,
-                    oldValue, getSctpConnection());
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void incrementSelectedCount()
+    {
+        int newValue = selectedCount.incrementAndGet();
+        if (newValue == 1)
+        {
+            String selectedUpdate = createSelectedUpdateMessage(true);
+            if (logger.isDebugEnabled())
+            {
+                logger.debug("Endpoint " + getID() + " is now "
+                    + "selected, sending message: " + selectedUpdate);
+            }
+            try
+            {
+                sendMessage(selectedUpdate);
+            }
+            catch (IOException e)
+            {
+                logger.error("Error sending SelectedUpdate message: " + e);
+            }
         }
     }
 
@@ -1000,16 +390,25 @@ public class Endpoint
      * {@inheritDoc}
      */
     @Override
-    public String toString()
+    public void decrementSelectedCount()
     {
-        return getClass().getName() + " " + getID();
-    }
-
-    /**
-     * Expires this <tt>Endpoint</tt>.
-     */
-    public void expire()
-    {
-        this.expired = true;
+        int newValue = selectedCount.decrementAndGet();
+        if (newValue == 0)
+        {
+            String selectedUpdate = createSelectedUpdateMessage(false);
+            if (logger.isDebugEnabled())
+            {
+                logger.debug("Endpoint " + getID() + " is no longer "
+                    + "selected, sending message: " + selectedUpdate);
+            }
+            try
+            {
+                sendMessage(selectedUpdate);
+            }
+            catch (IOException e)
+            {
+                logger.error("Error sending SelectedUpdate message: " + e);
+            }
+        }
     }
 }

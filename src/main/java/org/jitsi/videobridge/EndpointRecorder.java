@@ -25,7 +25,10 @@ import org.json.simple.*;
  * A class responsible for saving to disk information about <tt>Endpoint</tt>s.
  *
  * @author Boris Grozev
+ *
+ * @deprecated remove-with-recording
  */
+@Deprecated
 public class EndpointRecorder
 {
     /**
@@ -74,19 +77,23 @@ public class EndpointRecorder
      * <tt>Endpoint</tt>
      * @param endpoint the <tt>Endpoint</tt> to add.
      */
-    public void updateEndpoint(Endpoint endpoint)
+    public void updateEndpoint(AbstractEndpoint endpoint)
     {
         String id = endpoint.getID();
-        EndpointInfo endpointInfo = endpoints.get(id);
 
-        if (endpointInfo == null)
+        synchronized(endpoints)
         {
-            endpointInfo = new EndpointInfo(endpoint);
-            endpoints.put(id, endpointInfo);
-        }
-        else
-        {
-            endpointInfo.displayName = endpoint.getDisplayName();
+            EndpointInfo endpointInfo = endpoints.get(id);
+
+            if (endpointInfo == null)
+            {
+                endpointInfo = new EndpointInfo(endpoint);
+                endpoints.put(id, endpointInfo);
+            }
+            else
+            {
+                endpointInfo.displayName = endpoint.getDisplayName();
+            }
         }
 
         writeEndpoints();
@@ -115,15 +122,18 @@ public class EndpointRecorder
             FileWriter writer = new FileWriter(file, false);
             writer.write("[\n");
 
-            int size = endpoints.size();
-            int idx = 0;
-            for (EndpointInfo endpointInfo : endpoints.values())
+            synchronized (endpoints)
             {
-                writer.write("    ");
-                writer.write(endpointInfo.getJSON());
-                if (++idx != size)
-                    writer.write(",");
-                writer.write("\n");
+                int size = endpoints.size();
+                int idx = 0;
+                for (EndpointInfo endpointInfo : endpoints.values())
+                {
+                    writer.write("    ");
+                    writer.write(endpointInfo.getJSON());
+                    if (++idx != size)
+                        writer.write(",");
+                    writer.write("\n");
+                }
             }
 
             writer.write("]\n");
@@ -156,7 +166,7 @@ public class EndpointRecorder
          * @param endpoint the endpoint to use to initialize a new
          * <tt>EndpointInfo</tt> instance.
          */
-        private EndpointInfo(Endpoint endpoint)
+        private EndpointInfo(AbstractEndpoint endpoint)
         {
             id = endpoint.getID();
             displayName = endpoint.getDisplayName();

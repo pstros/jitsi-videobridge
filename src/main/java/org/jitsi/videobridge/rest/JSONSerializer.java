@@ -21,6 +21,7 @@ import net.java.sip.communicator.impl.protocol.jabber.extensions.*;
 import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
 import net.java.sip.communicator.impl.protocol.jabber.extensions.jingle.*;
 
+import org.jetbrains.annotations.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.videobridge.stats.*;
 import org.json.simple.*;
@@ -48,6 +49,13 @@ final class JSONSerializer
      */
     static final String CHANNEL_BUNDLES
         = ColibriConferenceIQ.ChannelBundle.ELEMENT_NAME + "s";
+
+    /**
+     * The name of the JSON pair which specifies the value of the
+     * <tt>endpoints</tt> property of <tt>ColibriConferenceIQ</tt>.
+     */
+    static final String ENDPOINTS
+        = ColibriConferenceIQ.Endpoint.ELEMENT_NAME + "s";
 
     /**
      * The name of the JSON pair which specifies the value of the
@@ -87,6 +95,13 @@ final class JSONSerializer
 
     /**
      * The name of the JSON pair which specifies the value of the
+     * <tt>rtcp-fb</tt> property of <tt>ColibriConferenceIQ.Channel</tt>.
+     */
+    static final String RTCP_FBS
+            = RtcpFbPacketExtension.ELEMENT_NAME + "s";
+
+    /**
+     * The name of the JSON pair which specifies the value of the
      * <tt>sctpConnections</tt> property of
      * <tt>ColibriConferenceIQ.Content</tt>.
      */
@@ -119,6 +134,13 @@ final class JSONSerializer
      */
     static final String RTP_HEADER_EXTS
         = RTPHdrExtPacketExtension.ELEMENT_NAME + "s";
+
+    /**
+     * The name of the JSON pair which specifies the value of the
+     *  <tt>webSockets</tt> property of <tt>WebSocketPacketExtension</tt>.
+     */
+    static final String WEBSOCKET_LIST
+            = WebSocketPacketExtension.ELEMENT_NAME + "s";
 
     /**
      * The name of the JSON pair which specifies the value of the
@@ -216,7 +238,6 @@ final class JSONSerializer
             List<SourceGroupPacketExtension> sourceGroups
                 = channel.getSourceGroups();
             int[] ssrcs = channel.getSSRCs();
-            SimulcastMode simulcastMode = channel.getSimulcastMode();
 
             jsonObject = serializeChannelCommon(channel);
             // direction
@@ -237,13 +258,6 @@ final class JSONSerializer
                 jsonObject.put(
                         ColibriConferenceIQ.Channel.LAST_N_ATTR_NAME,
                         lastN);
-            }
-            // simulcastMode
-            if (simulcastMode != null)
-            {
-                jsonObject.put(
-                        ColibriConferenceIQ.Channel.SIMULCAST_MODE_ATTR_NAME,
-                        simulcastMode.getText());
             }
             // receiving simulcast layer
             if (lastN != null)
@@ -323,6 +337,47 @@ final class JSONSerializer
         return jsonObject;
     }
 
+    public static JSONObject serializeEndpoint(
+            ColibriConferenceIQ.Endpoint endpoint)
+    {
+        JSONObject jsonObject;
+
+        if (endpoint == null)
+        {
+            jsonObject = null;
+        }
+        else
+        {
+            String id = endpoint.getId();
+            String statsId = endpoint.getStatsId();
+            String displayName = endpoint.getDisplayName();
+
+            jsonObject = new JSONObject();
+            // id
+            if (id != null)
+            {
+                jsonObject.put(
+                    ColibriConferenceIQ.Endpoint.ID_ATTR_NAME,
+                    id);
+            }
+            // statsId
+            if (statsId != null)
+            {
+                jsonObject.put(
+                    ColibriConferenceIQ.Endpoint.STATS_ID_ATTR_NAME,
+                    statsId);
+            }
+            // displayName
+            if (displayName != null)
+            {
+                jsonObject.put(
+                        ColibriConferenceIQ.Endpoint.DISPLAYNAME_ATTR_NAME,
+                    displayName);
+            }
+        }
+        return jsonObject;
+    }
+
     public static JSONArray serializeChannelBundles(
             Collection<ColibriConferenceIQ.ChannelBundle> channelBundles)
     {
@@ -339,6 +394,27 @@ final class JSONSerializer
                     : channelBundles)
             {
                 jsonArray.add(serializeChannelBundle(channelBundle));
+            }
+        }
+        return jsonArray;
+    }
+
+    public static JSONArray serializeEndpoints(
+            Collection<ColibriConferenceIQ.Endpoint> endpoints)
+    {
+        JSONArray jsonArray;
+
+        if (endpoints == null)
+        {
+            jsonArray = null;
+        }
+        else
+        {
+            jsonArray = new JSONArray();
+            for (ColibriConferenceIQ.Endpoint endpoint
+                    : endpoints)
+            {
+                jsonArray.add(serializeEndpoint(endpoint));
             }
         }
         return jsonArray;
@@ -444,6 +520,8 @@ final class JSONSerializer
                 = conference.getContents();
             List<ColibriConferenceIQ.ChannelBundle> channelBundles
                 = conference.getChannelBundles();
+            List<ColibriConferenceIQ.Endpoint> endpoints
+                = conference.getEndpoints();
             ColibriConferenceIQ.Recording recording = conference.getRecording();
             boolean isGracefulShutdown = conference.isGracefulShutdown();
 
@@ -460,6 +538,13 @@ final class JSONSerializer
                 jsonObject.put(
                         CHANNEL_BUNDLES,
                         serializeChannelBundles(channelBundles));
+            }
+            // endpoints
+            if ((endpoints != null) && !endpoints.isEmpty())
+            {
+                jsonObject.put(
+                        ENDPOINTS,
+                        serializeEndpoints(endpoints));
             }
             // recording
             if (recording != null)
@@ -628,6 +713,42 @@ final class JSONSerializer
         return parametersJSONObject;
     }
 
+    public static JSONArray serializeRtcpFbs(
+            @NotNull Collection<RtcpFbPacketExtension> rtcpFbs)
+    {
+        JSONArray rtcpFbsJSON = new JSONArray();
+        /*
+         * A rtcp-fb is an JSONObject with type / subtype data.
+         * "rtcp-fbs": [ {
+                "type": "ccm",
+                "subtype": "fir"
+              }, {
+                "type": "nack"
+              }, {
+                "type": "goog-remb"
+              } ]
+         */
+        for (RtcpFbPacketExtension ext : rtcpFbs)
+        {
+            String type = ext.getFeedbackType();
+            String subtype = ext.getFeedbackSubtype();
+
+            if (type != null)
+            {
+                JSONObject rtcpFbJSON = new JSONObject();
+                rtcpFbJSON.put(RtcpFbPacketExtension.TYPE_ATTR_NAME, type);
+                if (subtype != null)
+                {
+                    rtcpFbJSON.put(
+                            RtcpFbPacketExtension.SUBTYPE_ATTR_NAME,
+                            subtype);
+                }
+                rtcpFbsJSON.add(rtcpFbJSON);
+            }
+        }
+        return rtcpFbsJSON;
+    }
+
     public static JSONObject serializePayloadType(
             PayloadTypePacketExtension payloadType)
     {
@@ -653,6 +774,15 @@ final class JSONSerializer
                 payloadTypeJSONObject.put(
                         PARAMETERS,
                         serializeParameters(parameters));
+            }
+            final List<RtcpFbPacketExtension> rtcpFeedbackTypeList =
+                    payloadType.getRtcpFeedbackTypeList();
+            if ((rtcpFeedbackTypeList != null) &&
+                    !rtcpFeedbackTypeList.isEmpty())
+            {
+                payloadTypeJSONObject.put(
+                        RTCP_FBS,
+                        serializeRtcpFbs(rtcpFeedbackTypeList));
             }
         }
         return payloadTypeJSONObject;
@@ -856,6 +986,9 @@ final class JSONSerializer
                         DtlsFingerprintPacketExtension.class);
             List<CandidatePacketExtension> candidateList
                 = transport.getCandidateList();
+            List<WebSocketPacketExtension> webSocketList
+                = transport.getChildExtensionsOfType(
+                        WebSocketPacketExtension.class);
             RemoteCandidatePacketExtension remoteCandidate
                 = transport.getRemoteCandidate();
             boolean rtcpMux = transport.isRtcpMux();
@@ -887,6 +1020,12 @@ final class JSONSerializer
                         remoteCandidate.getElementName(),
                         serializeCandidate(remoteCandidate));
             }
+            if ( (webSocketList != null) && (!webSocketList.isEmpty()) )
+            {
+                jsonObject.put(
+                        WEBSOCKET_LIST,
+                        serializeWebSockets(webSocketList));
+            }
             // rtcpMux
             if (rtcpMux)
             {
@@ -896,6 +1035,30 @@ final class JSONSerializer
             }
         }
         return jsonObject;
+    }
+
+    private static String serializeWebSocket(
+             WebSocketPacketExtension webSocket)
+    {
+        return webSocket.getUrl();
+    }
+
+    private static JSONArray serializeWebSockets(
+             List<WebSocketPacketExtension> webSocketList)
+    {
+        JSONArray webSocketsJSONArray;
+
+        if (webSocketList == null)
+        {
+            webSocketsJSONArray = null;
+        }
+        else
+        {
+            webSocketsJSONArray = new JSONArray();
+            for (WebSocketPacketExtension webSocket : webSocketList)
+                webSocketsJSONArray.add(serializeWebSocket(webSocket));
+        }
+        return webSocketsJSONArray;
     }
 
     /** Prevents the initialization of new <tt>JSONSerializer</tt> instances. */

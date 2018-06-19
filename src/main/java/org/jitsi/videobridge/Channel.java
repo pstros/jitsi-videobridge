@@ -16,12 +16,15 @@
 package org.jitsi.videobridge;
 
 import java.io.*;
+import java.util.*;
 
 import org.jitsi.eventadmin.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.util.*;
 import org.jitsi.util.concurrent.*;
 import org.jitsi.util.event.*;
+import org.jitsi.videobridge.octo.*;
+import org.jitsi.videobridge.util.*;
 import org.osgi.framework.*;
 
 import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
@@ -36,6 +39,7 @@ import net.java.sip.communicator.impl.protocol.jabber.extensions.jingle.*;
  */
 public abstract class Channel
     extends PropertyChangeNotifier
+    implements Expireable
 {
     /**
      * The default number of seconds of inactivity after which <tt>Channel</tt>s
@@ -52,11 +56,38 @@ public abstract class Channel
     public static final String INITIATOR_PROPERTY = "initiator";
 
     /**
+     * The name of the <tt>Channel</tt> property <tt>endpoint</tt> which
+     * points to the <tt>Endpoint</tt> of the conference participant associated
+     * with this <tt>Channel</tt>..
+     */
+    public static final String ENDPOINT_PROPERTY_NAME = ".endpoint";
+
+    /**
      * The {@link Logger} used by the {@link Channel} class to print debug
      * information. Note that {@link Channel} instances should use {@link
      * #logger} instead.
      */
     private static final Logger classLogger = Logger.getLogger(Channel.class);
+
+    /**
+     * @return a string which identifies a specific {@link Channel} for the
+     * purposes of logging (i.e. includes the ID of the channel, the ID of its
+     * conference and potentially other information). The string is a
+     * comma-separated list of "key=value" pairs.
+     * @param channel The channel for which to return a string.
+     */
+    public static String getLoggingId(Channel channel)
+    {
+        String id = channel == null ? "null" : channel.getID();
+        Content content
+            = channel == null ? null : channel.getContent();
+        AbstractEndpoint endpoint
+            = channel == null ? null : channel.getEndpoint();
+
+        return Content.getLoggingId(content)
+            + ",ch_id=" + id
+            + ",endp_id=" + (endpoint == null ? "null" : endpoint.getID());
+    }
 
     /**
      * The ID of the channel-bundle that this <tt>Channel</tt> is part of, or
@@ -65,11 +96,9 @@ public abstract class Channel
     private final String channelBundleId;
 
     /**
-     * The name of the <tt>Channel</tt> property <tt>endpoint</tt> which
-     * points to the <tt>Endpoint</tt> of the conference participant associated
-     * with this <tt>Channel</tt>..
+     * Remembers when this <tt>Channel</tt> instance was created.
      */
-    public static final String ENDPOINT_PROPERTY_NAME = ".endpoint";
+    private final long creationTimestamp = System.currentTimeMillis();
 
     /**
      * The <tt>Content</tt> which has initialized this <tt>Channel</tt>.
@@ -77,10 +106,10 @@ public abstract class Channel
     private final Content content;
 
     /**
-     * The <tt>Endpoint</tt> of the conference participant associated with this
-     * <tt>Channel</tt>.
+     * The {@link AbstractEndpoint} of the conference participant associated with
+     * this {@link Channel}.
      */
-    private Endpoint endpoint;
+    private AbstractEndpoint endpoint;
 
     /**
      * The number of seconds of inactivity after which this <tt>Channel</tt>
@@ -149,7 +178,7 @@ public abstract class Channel
      * Transport packet extension namespace used by {@link #transportManager}.
      * Indicates whether ICE or RAW transport is used by this channel.
      */
-    private final String transportNamespace;
+    protected final String transportNamespace;
 
     /**
      * The <tt>Object</tt> which synchronizes the access to
@@ -162,6 +191,11 @@ public abstract class Channel
      * information.
      */
     private final Logger logger;
+
+    /**
+     * The {@link ExpireableImpl} which we use to safely expire this channel.
+     */
+    private final ExpireableImpl expireableImpl;
 
     /**
      * Initializes a new <tt>Channel</tt> instance which is to have a specific
@@ -190,16 +224,16 @@ public abstract class Channel
             Boolean initiator)
         throws Exception
     {
-        if (content == null)
-            throw new NullPointerException("content");
-        if (StringUtils.isNullOrEmpty(id))
-            throw new NullPointerException("id");
+        Objects.requireNonNull(content, "content");
+        org.jivesoftware.smack.util.StringUtils.requireNotNullOrEmpty(id, "id");
 
         this.id = id;
         this.content = content;
         this.channelBundleId = channelBundleId;
         if (initiator != null)
+        {
             this.initiator = initiator;
+        }
 
         this.logger
             = Logger.getLogger(classLogger,
@@ -214,6 +248,8 @@ public abstract class Channel
         }
 
         this.transportNamespace = transportNamespace;
+
+        expireableImpl = new ExpireableImpl(getLoggingId(), this::expire);
 
         touch();
     }
@@ -291,6 +327,10 @@ public abstract class Channel
         {
             return new RawUdpTransportManager(this);
         }
+        else if (OctoTransportManager.NAMESPACE.equals(xmlNamespace))
+        {
+            return new OctoTransportManager(this);
+        }
         else
         {
             throw new IllegalArgumentException(
@@ -309,10 +349,12 @@ public abstract class Channel
      */
     public void describe(ColibriConferenceIQ.ChannelCommon iq)
     {
-        Endpoint endpoint = getEndpoint();
+        AbstractEndpoint endpoint = getEndpoint();
 
         if (endpoint != null)
+        {
             iq.setEndpoint(endpoint.getID());
+        }
 
         iq.setID(id);
         iq.setExpire(getExpire());
@@ -321,9 +363,13 @@ public abstract class Channel
         // If a channel is part of a bundle, its transport will be described in
         // the channel-bundle itself.
         if (channelBundleId != null)
+        {
             iq.setChannelBundleId(channelBundleId);
+        }
         else
+        {
             describeTransportManager(iq);
+        }
     }
 
     /**
@@ -339,7 +385,9 @@ public abstract class Channel
         TransportManager transportManager = getTransportManager();
 
         if (transportManager != null)
+        {
             transportManager.describe(iq);
+        }
     }
 
     /**
@@ -354,9 +402,13 @@ public abstract class Channel
         synchronized (this)
         {
             if (expired)
+            {
                 return false;
+            }
             else
+            {
                 expired = true;
+            }
         }
 
         Content content = getContent();
@@ -364,7 +416,9 @@ public abstract class Channel
 
         EventAdmin eventAdmin = conference.getEventAdmin();
         if (eventAdmin != null)
+        {
             eventAdmin.sendEvent(EventFactory.channelExpired(this));
+        }
 
         try
         {
@@ -385,7 +439,9 @@ public abstract class Channel
                             + " of conference " + conference.getID() + "!",
                         t);
                 if (t instanceof ThreadDeath)
+                {
                     throw (ThreadDeath) t;
+                }
             }
 
             // transportManager
@@ -394,7 +450,9 @@ public abstract class Channel
                 synchronized (transportManagerSyncRoot)
                 {
                     if (transportManager != null)
+                    {
                         transportManager.close(this);
+                    }
                 }
             }
             catch (Throwable t)
@@ -406,7 +464,9 @@ public abstract class Channel
                             + conference.getID() + "!",
                         t);
                 if (t instanceof ThreadDeath)
+                {
                     throw (ThreadDeath) t;
+                }
             }
 
             // endpoint
@@ -420,19 +480,16 @@ public abstract class Channel
             catch (Throwable t)
             {
                 if (t instanceof ThreadDeath)
+                {
                     throw (ThreadDeath) t;
+                }
             }
-
-            Videobridge videobridge = conference.getVideobridge();
 
             if (logger.isInfoEnabled())
             {
 
-                logger.info(
-                        "Expired channel " + getID() + " of content "
-                            + content.getName() + " of conference "
-                            + conference.getID() + ". "
-                            + videobridge.getConferenceCountString());
+                logger.info(Logger.Category.STATISTICS,
+                            "expire_ch," + getLoggingId());
             }
         }
 
@@ -463,6 +520,18 @@ public abstract class Channel
     }
 
     /**
+     * Gets the time in milliseconds which tells when this <tt>Channel</tt> was
+     * created.
+     *
+     * @return the time in milliseconds which indicates when this
+     * <tt>Channel</tt> instance was created.
+     */
+    public long getCreationTimestamp()
+    {
+        return creationTimestamp;
+    }
+
+    /**
      * Child classes should implement this method and return
      * <tt>DtlsControl</tt> instance if they are willing to use DTLS transport.
      * Otherwise, <tt>null</tt> should be returned.
@@ -470,26 +539,33 @@ public abstract class Channel
      * @return <tt>DtlsControl</tt> if this instance supports DTLS transport or
      * <tt>null</tt> otherwise.
      */
-    protected DtlsControl getDtlsControl()
+    protected SrtpControl getSrtpControl()
     {
         TransportManager transportManager = getTransportManager();
 
         return
             (transportManager == null)
                 ? null
-                : transportManager.getDtlsControl(this);
+                : transportManager.getSrtpControl(this);
     }
 
     /**
-     * Gets the <tt>Endpoint</tt> of the conference participant associated with
-     * this <tt>Channel</tt>.
-     *
-     * @return the <tt>Endpoint</tt> of the conference participant associated
-     * with this <tt>Channel</tt>
+     * @return the {@link AbstractEndpoint} of the conference participant associated
+     * with this {@link Channel}.
      */
-    public Endpoint getEndpoint()
+    public AbstractEndpoint getEndpoint()
     {
         return endpoint;
+    }
+
+    /**
+     * @return the {@link AbstractEndpoint} associated with this {@link Channel}
+     * which has a particular SSRC.
+     * @param ssrc the ssrc
+     */
+    public AbstractEndpoint getEndpoint(long ssrc)
+    {
+        return getEndpoint();
     }
 
     /**
@@ -604,11 +680,13 @@ public abstract class Channel
             {
                 transportManager
                     = getContent().getConference()
-                        .getTransportManager(channelBundleId, true);
+                        .getTransportManager(channelBundleId, true, isInitiator());
             }
 
             if (transportManager == null)
+            {
                 throw new IOException("Failed to get transport manager.");
+            }
 
             transportManager.addChannel(this);
         }
@@ -661,49 +739,62 @@ public abstract class Channel
      * @param oldValue old <tt>Endpoint</tt>, can be <tt>null</tt>.
      * @param newValue new <tt>Endpoint</tt>, can be <tt>null</tt>.
      */
-    protected void onEndpointChanged(Endpoint oldValue, Endpoint newValue)
+    protected void onEndpointChanged(
+        AbstractEndpoint oldValue, AbstractEndpoint newValue)
     {
         firePropertyChange(ENDPOINT_PROPERTY_NAME, oldValue, newValue);
     }
 
     /**
-     * Sets the identifier of the endpoint of the conference participant
+     * Sets the identifier of the newEndpointId of the conference participant
      * associated with this <tt>Channel</tt>.
      *
-     * @param endpoint the identifier of the endpoint of the conference
+     * @param newEndpointId the identifier of the newEndpointId of the conference
      * participant associated with this <tt>Channel</tt>
      */
-    public void setEndpoint(String endpoint)
+    public void setEndpoint(String newEndpointId)
     {
         try
         {
-            Endpoint oldValue = this.endpoint;
+            AbstractEndpoint oldValue = this.endpoint;
 
             // Is the endpoint really changing?
             if (oldValue == null)
             {
-                if (endpoint == null)
+                if (newEndpointId == null)
+                {
                     return;
+                }
             }
-            else if (oldValue.getID().equals(endpoint))
+            else if (oldValue.getID().equals(newEndpointId))
             {
                 return;
             }
 
             // The endpoint is really changing.
-            Endpoint newValue
-                = getContent().getConference().getOrCreateEndpoint(endpoint);
-
-            if (oldValue != newValue)
-            {
-                this.endpoint = newValue;
-
-                onEndpointChanged(oldValue, newValue);
-            }
+            AbstractEndpoint newValue
+                = getContent().getConference()
+                        .getOrCreateEndpoint(newEndpointId);
+            setEndpoint(newValue);
         }
         finally
         {
             touch(); // It seems this Channel is still active.
+        }
+    }
+
+    /**
+     * Sets the {@link Endpoint} of this {@link Channel} to a particular
+     * instance.
+     * @param endpoint the new {@link Endpoint} instance.
+     */
+    public void setEndpoint(AbstractEndpoint endpoint)
+    {
+        AbstractEndpoint oldEndpoint = this.endpoint;
+        if (oldEndpoint != endpoint)
+        {
+            this.endpoint = endpoint;
+            onEndpointChanged(oldEndpoint, endpoint);
         }
     }
 
@@ -718,14 +809,20 @@ public abstract class Channel
     public void setExpire(int expire)
     {
         if (expire < 0)
+        {
             throw new IllegalArgumentException("expire");
+        }
 
         this.expire = expire;
 
         if (this.expire == 0)
+        {
             expire();
+        }
         else
+        {
             touch(); // It seems this Channel is still active.
+        }
     }
 
     /**
@@ -740,9 +837,7 @@ public abstract class Channel
     public void setInitiator(boolean initiator)
     {
         boolean oldValue = this.initiator;
-
         this.initiator = initiator;
-
         boolean newValue = this.initiator;
 
         touch(); // It seems this Channel is still active.
@@ -809,33 +904,13 @@ public abstract class Channel
         {
             case PAYLOAD:
                 lastPayloadActivityTime.increase(now);
+                // fall-through
             case TRANSPORT:
                 lastTransportActivityTime.increase(now);
+                // fall-through
             default:
                 lastActivityTime.increase(now);
         }
-    }
-
-    /**
-     * This enum describes the possible {@link Channel} activity types.
-     */
-    public enum ActivityType
-    {
-        /**
-         * Transport level activity like ICE consent checks and/or RTP/RTCP
-         * packets received.
-         */
-        TRANSPORT,
-
-        /**
-         * Application level activity like RTP/RTCP packets received.
-         */
-        PAYLOAD,
-
-        /**
-         * Anything else that doesn't fall in the above two categories.
-         */
-        OTHER
     }
 
     /**
@@ -862,10 +937,8 @@ public abstract class Channel
      */
     void transportConnected()
     {
-        logger.info("Transport connected for channel " + getID()
-                            + " of content " + getContent().getName()
-                            + " of conference "
-                            + getContent().getConference().getID());
+        logger.info(Logger.Category.STATISTICS,
+                    "transport_connected," + getLoggingId());
 
         // It seems this Channel is still active.
         touch(ActivityType.TRANSPORT /* transport connected */);
@@ -890,5 +963,60 @@ public abstract class Channel
     public String getChannelBundleId()
     {
         return channelBundleId;
+    }
+
+    /**
+     * @return a string which identifies this{@link Channel} for the purposes
+     * of logging (i.e. includes the ID of the channel, the ID of its
+     * conference and potentially other information). The string is a
+     * comma-separated list of "key=value" pairs.
+     */
+    public String getLoggingId()
+    {
+        return getLoggingId(this);
+    }
+
+    /**
+     * {@inheritDoc}
+     * </p>
+     * @return {@code true} if this {@link Channel} is ready to be expired.
+     */
+    @Override
+    public boolean shouldExpire()
+    {
+        return
+            getLastActivityTime() + 1000L * getExpire()
+                < System.currentTimeMillis();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void safeExpire()
+    {
+        expireableImpl.safeExpire();
+    }
+
+    /**
+     * This enum describes the possible {@link Channel} activity types.
+     */
+    public enum ActivityType
+    {
+        /**
+         * Transport level activity like ICE consent checks and/or RTP/RTCP
+         * packets received.
+         */
+        TRANSPORT,
+
+        /**
+         * Application level activity like RTP/RTCP packets received.
+         */
+        PAYLOAD,
+
+        /**
+         * Anything else that doesn't fall in the above two categories.
+         */
+        OTHER
     }
 }

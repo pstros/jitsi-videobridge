@@ -20,9 +20,12 @@ import java.text.*;
 import java.util.*;
 import java.util.concurrent.locks.*;
 
+import net.java.sip.communicator.util.*;
+import org.jitsi.service.configuration.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.service.neomedia.stats.*;
 import org.jitsi.videobridge.*;
+import org.jitsi.videobridge.octo.*;
 import org.json.simple.*;
 import org.osgi.framework.*;
 
@@ -129,7 +132,7 @@ public class VideobridgeStatistics
     /**
      * The number of buckets to use for conference sizes.
      */
-    private static final int CONFERENCE_SIZE_BUCKETS = 15;
+    private static final int CONFERENCE_SIZE_BUCKETS = 22;
 
     /**
      * The name of the stat that indicates the bridge has entered graceful
@@ -215,6 +218,34 @@ public class VideobridgeStatistics
     private static final String TOTAL_TCP_CONNECTIONS = "total_tcp_connections";
 
     /**
+     * The name of the stat indicating the total number of messages received
+     * from data channels.
+     */
+    private static final String TOTAL_DATA_CHANNEL_MESSAGES_RECEIVED
+        = "total_data_channel_messages_received";
+
+    /**
+     * The name of the stat indicating the total number of messages sent over
+     * data channels.
+     */
+    private static final String TOTAL_DATA_CHANNEL_MESSAGES_SENT
+        = "total_data_channel_messages_sent";
+
+    /**
+     * The name of the stat indicating the total number of messages received
+     * from data channels.
+     */
+    private static final String TOTAL_COLIBRI_WEB_SOCKET_MESSAGES_RECEIVED
+        = "total_colibri_web_socket_messages_received";
+
+    /**
+     * The name of the stat indicating the total number of messages sent over
+     * data channels.
+     */
+    private static final String TOTAL_COLIBRI_WEB_SOCKET_MESSAGES_SENT
+        = "total_colibri_web_socket_messages_sent";
+
+    /**
      * The name of used memory statistic. Its runtime type is {@code Integer}.
      */
     public static final String USED_MEMORY = "used_memory";
@@ -230,6 +261,26 @@ public class VideobridgeStatistics
      * {@code Integer}.
      */
     public static final String VIDEOSTREAMS = "videostreams";
+
+    /**
+     * The name of the "relay_id" statistic.
+     */
+    public static final String RELAY_ID = "relay_id";
+
+    /**
+     * The name of the "region" statistic.
+     */
+    public static final String REGION = "region";
+
+    /**
+     * The currently configured region.
+     */
+    public static String region = null;
+
+    /**
+     * The name of the property used to configure the region.
+     */
+    public static final String REGION_PNAME = "org.jitsi.videobridge.REGION";
 
     static
     {
@@ -260,6 +311,16 @@ public class VideobridgeStatistics
      */
     public VideobridgeStatistics()
     {
+        BundleContext bundleContext
+            = StatsManagerBundleActivator.getBundleContext();
+
+        ConfigurationService cfg
+            = ServiceUtils.getService(bundleContext, ConfigurationService.class);
+        if (cfg != null)
+        {
+            region = cfg.getString(REGION_PNAME, region);
+        }
+
         // Is it necessary to set initial values for all of these?
         unlockedSetStat(AUDIOCHANNELS, 0);
         unlockedSetStat(BITRATE_DOWNLOAD, 0d);
@@ -364,9 +425,18 @@ public class VideobridgeStatistics
             totalChannels = 0;
         long totalConferenceSeconds = 0;
         int totalUdpConnections = 0, totalTcpConnections = 0;
+        long totalDataChannelMessagesReceived = 0;
+        long totalDataChannelMessagesSent = 0;
+        long totalColibriWebSocketMessagesReceived = 0;
+        long totalColibriWebSocketMessagesSent = 0;
 
         BundleContext bundleContext
             = StatsManagerBundleActivator.getBundleContext();
+
+        OctoRelayService relayService
+            = ServiceUtils.getService(bundleContext, OctoRelayService.class);
+        String relayId = relayService == null ? null : relayService.getRelayId();
+
         for (Videobridge videobridge
                 : Videobridge.getVideobridges(bundleContext))
         {
@@ -383,6 +453,15 @@ public class VideobridgeStatistics
             totalChannels += jvbStats.totalChannels.get();
             totalUdpConnections += jvbStats.totalUdpTransportManagers.get();
             totalTcpConnections += jvbStats.totalTcpTransportManagers.get();
+            totalDataChannelMessagesReceived
+                += jvbStats.totalDataChannelMessagesReceived.get();
+            totalDataChannelMessagesSent
+                += jvbStats.totalDataChannelMessagesSent.get();
+            totalColibriWebSocketMessagesReceived
+                += jvbStats.totalColibriWebSocketMessagesReceived.get();
+            totalColibriWebSocketMessagesSent
+                += jvbStats.totalColibriWebSocketMessagesSent.get();
+
 
             for (Conference conference : videobridge.getConferences())
             {
@@ -588,8 +667,24 @@ public class VideobridgeStatistics
             unlockedSetStat(TOTAL_MEMORY, Math.max(totalMemory, 0));
             unlockedSetStat(USED_MEMORY, Math.max(usedMemory, 0));
             unlockedSetStat(SHUTDOWN_IN_PROGRESS, shutdownInProgress);
+            unlockedSetStat(TOTAL_DATA_CHANNEL_MESSAGES_RECEIVED,
+                            totalDataChannelMessagesReceived);
+            unlockedSetStat(TOTAL_DATA_CHANNEL_MESSAGES_SENT,
+                            totalDataChannelMessagesSent);
+            unlockedSetStat(TOTAL_COLIBRI_WEB_SOCKET_MESSAGES_RECEIVED,
+                            totalColibriWebSocketMessagesReceived);
+            unlockedSetStat(TOTAL_COLIBRI_WEB_SOCKET_MESSAGES_SENT,
+                            totalColibriWebSocketMessagesSent);
 
             unlockedSetStat(TIMESTAMP, timestamp);
+            if (relayId != null)
+            {
+                unlockedSetStat(RELAY_ID, relayId);
+            }
+            if (region != null)
+            {
+                unlockedSetStat(REGION, region);
+            }
         }
         finally
         {

@@ -30,6 +30,8 @@ import org.jitsi.service.neomedia.device.*;
 import org.jitsi.service.neomedia.recording.*;
 import org.jitsi.util.*;
 import org.jitsi.util.event.*;
+import org.jitsi.videobridge.util.*;
+import org.jitsi.videobridge.octo.*;
 import org.osgi.framework.*;
 
 /**
@@ -37,10 +39,11 @@ import org.osgi.framework.*;
  *
  * @author Lyubomir Marinov
  * @author Boris Grozev
+ * @author George Politis
  */
 public class Content
     extends PropertyChangeNotifier
-    implements RTPTranslator.WriteFilter
+    implements RTPTranslator.WriteFilter, Expireable
 {
     /**
      * The @{link #Logger} used by the {@link Content} class. Note that class
@@ -54,6 +57,21 @@ public class Content
      */
     public static final String CHANNEL_MODIFIED_PROPERTY_NAME
         = "org.jitsi.videobridge.VideoChannel.mod";
+
+    /**
+     * @return a string which identifies a specific {@link Content} for the
+     * purposes of logging (i.e. includes the name of the content and ID of its
+     * conference). The string is a comma-separated list of "key=value" pairs.
+     * @param content The channel for which to return a string.
+     */
+    static String getLoggingId(Content content)
+    {
+        if (content == null)
+        {
+            return Conference.getLoggingId(null) + ",content=null";
+        }
+        return content.getLoggingId();
+    }
 
     /**
      * The <tt>Channel</tt>s of this <tt>Content</tt> mapped by their IDs.
@@ -106,22 +124,31 @@ public class Content
     private final String name;
 
     /**
+     * The string which identifies this content for the purposes of logging.
+     */
+    private final String loggingId;
+
+    /**
      * The <tt>Recorder</tt> instance used to record video.
      */
     private Recorder recorder = null;
 
     /**
      * Whether media recording is currently enabled for this <tt>Content</tt>.
+     *
+     * @deprecated remove-with-recording
      */
+    @Deprecated
     private boolean recording = false;
 
     /**
      * Path to the directory into which files relating to media recording for
      * this <tt>Content</tt> will be stored.
+     *
+     * @deprecated remove-with-recording
      */
+    @Deprecated
     private String recordingPath = null;
-
-    private RTCPFeedbackMessageSender rtcpFeedbackMessageSender;
 
     /**
      * The <tt>Object</tt> which synchronizes the access to the RTP-level relays
@@ -144,6 +171,11 @@ public class Content
     private final Logger logger;
 
     /**
+     * The {@link ExpireableImpl} which we use to safely expire this content.
+     */
+    private final ExpireableImpl expireableImpl;
+
+    /**
      * Initializes a new <tt>Content</tt> instance which is to be a part of a
      * specific <tt>Conference</tt> and which is to have a specific name.
      *
@@ -153,30 +185,35 @@ public class Content
      */
     public Content(Conference conference, String name)
     {
-        if (conference == null)
-            throw new NullPointerException("conference");
-        if (name == null)
-            throw new NullPointerException("name");
-
-        this.conference = conference;
-        this.name = name;
+        this.conference = Objects.requireNonNull(conference, "conference");
+        this.name = Objects.requireNonNull(name, "name");
+        this.loggingId = conference.getLoggingId() + ",content=" + name;
         this.logger = Logger.getLogger(classLogger, conference.getLogger());
 
         mediaType = MediaType.parseString(this.name);
 
+        expireableImpl = new ExpireableImpl(getLoggingId(), this::expire);
+
         EventAdmin eventAdmin = conference.getEventAdmin();
         if (eventAdmin != null)
+        {
             eventAdmin.sendEvent(EventFactory.contentCreated(this));
+        }
 
         touch();
     }
 
+    /**
+     * Implements
+     * {@link RTPTranslator.WriteFilter#accept(
+     *      MediaStream, RawPacket, MediaStream, boolean)}
+     */
     @Override
     public boolean accept(
-            MediaStream source,
-            byte[] buffer, int offset, int length,
-            MediaStream destination,
-            boolean data)
+        MediaStream source,
+        RawPacket pkt,
+        MediaStream destination,
+        boolean data)
     {
         boolean accept = true;
 
@@ -192,50 +229,11 @@ public class Content
                 accept
                     = dst.rtpTranslatorWillWrite(
                             data,
-                            buffer, offset, length,
+                            pkt,
                             src);
             }
         }
         return accept;
-    }
-
-    /**
-     * Sends keyframe requests for all SSRCs in all video channels of the
-     * endpoints specified by ID in {@code endpointIds}.
-     * @param endpointIds the list of IDs of endpoints to send keyframe
-     * requests to.
-     */
-    public void askForKeyframesById(Collection<String> endpointIds)
-    {
-        List<Endpoint> endpoints = new LinkedList<>();
-        Conference conference = getConference();
-        for (String endpointId : endpointIds)
-        {
-            Endpoint endpoint = conference.getEndpoint(endpointId);
-            if (endpoint != null)
-            {
-                endpoints.add(endpoint);
-            }
-        }
-
-        if (!endpoints.isEmpty())
-        {
-            askForKeyframes(endpoints);
-        }
-    }
-
-    /**
-     * Sends keyframe requests for all SSRCs in all video channels of the
-     * endpoints in {@code endpoints}.
-     * @param endpoints the list of endpoints to send keyframe requests to.
-     */
-    void askForKeyframes(Collection<Endpoint> endpoints)
-    {
-        for (Endpoint endpoint : endpoints)
-        {
-            for (RtpChannel channel : endpoint.getChannels(MediaType.VIDEO))
-                channel.askForKeyframes();
-        }
     }
 
     /**
@@ -262,62 +260,112 @@ public class Content
                                        RTPLevelRelayType rtpLevelRelayType)
         throws Exception
     {
-        RtpChannel channel = null;
+        return createRtpChannel(
+                channelBundleId, transportNamespace,
+                initiator, rtpLevelRelayType,
+                false /* octo */);
+    }
 
-        do
+    /**
+     * Initializes a new <tt>RtpChannel</tt> instance and adds it to the list of
+     * <tt>RtpChannel</tt>s of this <tt>Content</tt>. The new
+     * <tt>RtpChannel</tt> instance has an ID which is unique within the list of
+     * <tt>RtpChannel</tt>s of this <tt>Content</tt>.
+     *
+     * @param channelBundleId the ID of the channel-bundle that the created
+     * <tt>RtpChannel</tt> is to be a part of (or <tt>null</tt> if it is not to
+     * be a part of a channel-bundle).
+     * @param transportNamespace transport namespace that will used by new
+     * channel. Can be either {@link IceUdpTransportPacketExtension#NAMESPACE}
+     * or {@link RawUdpTransportPacketExtension#NAMESPACE}.
+     * @param initiator the value to use for the initiator field, or
+     * <tt>null</tt> to use the default value.
+     * @param rtpLevelRelayType
+     * @return the created <tt>RtpChannel</tt> instance.
+     * @param octo whether to create a regular channel or an Octo channel.
+     * @throws Exception
+     */
+    public RtpChannel createRtpChannel(String channelBundleId,
+                                       String transportNamespace,
+                                       Boolean initiator,
+                                       RTPLevelRelayType rtpLevelRelayType,
+                                       boolean octo)
+        throws Exception
+    {
+        RtpChannel channel;
+
+        synchronized (channels)
         {
-            String id = generateChannelID();
+            String id = generateUniqueChannelID();
 
-            synchronized (channels)
+            if (octo)
             {
-                if (!channels.containsKey(id))
+                channel = new OctoChannel(this, id);
+            }
+            else
+            {
+                switch (getMediaType())
                 {
-                    switch (getMediaType())
-                    {
-                    case AUDIO:
-                        channel = new AudioChannel(
+                case AUDIO:
+                    channel
+                        = new AudioChannel(
                                 this, id, channelBundleId,
                                 transportNamespace, initiator);
-                        break;
-                    case DATA:
-                        /*
-                         * MediaType.DATA signals an SctpConnection, not an
-                         * RtpChannel.
-                         */
-                        throw new IllegalStateException("mediaType");
-                    case VIDEO:
-                        channel = new VideoChannel(
+                    break;
+                case DATA:
+                    // MediaType.DATA signals an SctpConnection, not an
+                    // RtpChannel.
+                    throw new IllegalStateException("mediaType");
+                case VIDEO:
+                    channel
+                        = new VideoChannel(
                                 this, id, channelBundleId,
                                 transportNamespace, initiator);
-                        break;
-                    default:
-                        channel = new RtpChannel(
-                            this, id, channelBundleId,
-                            transportNamespace, initiator);
-                        break;
-                    }
-                    channels.put(id, channel);
+                    break;
+                default:
+                    channel
+                        = new RtpChannel(
+                                this, id, channelBundleId,
+                                transportNamespace, initiator);
+                    break;
                 }
             }
+
+            channels.put(id, channel);
         }
-        while (channel == null);
 
         // Initialize channel
         channel.initialize(rtpLevelRelayType);
 
         if (logger.isInfoEnabled())
         {
-            /*
-             * The method Videobridge.getChannelCount() should better be
-             * executed outside synchronized blocks in order to reduce the risks
-             * of causing deadlocks.
-             */
+            String transport = "unknown";
+            if (octo)
+            {
+                transport = "octo";
+            }
+            else if (transportNamespace == null)
+            {
+                transport = "default";
+            }
+            else if (IceUdpTransportPacketExtension.NAMESPACE
+                .equals(transportNamespace))
+            {
+                transport = "ice";
+            }
+            else if (RawUdpTransportPacketExtension.NAMESPACE
+                .equals(transportNamespace))
+            {
+                transport = "rawudp";
+            }
 
-            Videobridge videobridge = getConference().getVideobridge();
-            logger.info(
-                    "Created channel " + channel.getID() + " of content "
-                        + getName() + " of conference " + conference.getID()
-                        + ". " + videobridge.getConferenceCountString());
+            logger.info(Logger.Category.STATISTICS,
+                        "create_channel," + channel.getLoggingId()
+                        + " transport=" + transport
+                        + ",bundle=" + channelBundleId
+                        + ",initiator=" + initiator
+                        + ",media_type=" + getMediaType()
+                        + ",relay_type=" + rtpLevelRelayType);
         }
 
         return channel;
@@ -341,7 +389,7 @@ public class Content
      * already for given <tt>Endpoint</tt>.
      */
     public SctpConnection createSctpConnection(
-            Endpoint endpoint,
+            AbstractEndpoint endpoint,
             int sctpPort,
             String channelBundleId,
             Boolean initiator)
@@ -387,9 +435,13 @@ public class Content
         synchronized (this)
         {
             if (expired)
+            {
                 return;
+            }
             else
+            {
                 expired = true;
+            }
         }
 
         setRecording(false, null);
@@ -418,30 +470,26 @@ public class Content
                 catch (Throwable t)
                 {
                     logger.warn(
-                            "Failed to expire channel " + channel.getID()
-                                + " of content " + getName() + " of conference "
-                                + conference.getID() + "!",
-                            t);
+                        "Failed to expire channel " + channel.getLoggingId(),
+                        t);
                     if (t instanceof ThreadDeath)
+                    {
                         throw (ThreadDeath) t;
+                    }
                 }
             }
 
             synchronized (rtpLevelRelaySyncRoot)
             {
                 if (rtpTranslator != null)
+                {
                     rtpTranslator.dispose();
-                rtcpFeedbackMessageSender = null;
+                }
             }
 
             if (logger.isInfoEnabled())
             {
-                Videobridge videobridge = conference.getVideobridge();
-
-                logger.info(
-                        "Expired content " + getName() + " of conference "
-                            + conference.getID()
-                            + ". " + videobridge.getConferenceCountString());
+                logger.info("expire_content," + getLoggingId());
             }
         }
     }
@@ -467,17 +515,24 @@ public class Content
                 expireChannel = true;
             }
             else
+            {
                 expireChannel = false;
+            }
         }
         if (expireChannel)
+        {
             channel.expire();
+        }
     }
 
     /**
      * If media recording is started, finds all SSRCs received on all channels,
      * and sets their endpoints to the <tt>Recorder</tt>'s <tt>Synchronizer</tt>
      * instance.
+     *
+     * @deprecated remove-with-recording
      */
+    @Deprecated
     void feedKnownSsrcsToSynchronizer()
     {
         Recorder recorder;
@@ -487,48 +542,22 @@ public class Content
             for (Channel channel : getChannels())
             {
                 if (!(channel instanceof RtpChannel))
+                {
                     continue;
-                Endpoint endpoint = channel.getEndpoint();
-                if(endpoint == null)
+                }
+                AbstractEndpoint endpoint = channel.getEndpoint();
+                if (endpoint == null)
+                {
                     continue;
+                }
 
                 for(int s : ((RtpChannel) channel).getReceiveSSRCs())
                 {
-                    long ssrc = s & 0xffffffffl;
+                    long ssrc = s & 0xffff_ffffL;
                     synchronizer.setEndpoint(ssrc, endpoint.getID());
                 }
             }
         }
-    }
-
-    /**
-     * XXX REMOVE
-     * Returns a <tt>Channel</tt> of this <tt>Content</tt>, which has
-     * <tt>ssrc</tt> in its list of received SSRCs, or <tt>null</tt> in case no
-     * such <tt>Channel</tt> exists.
-     * @param ssrc the ssrc to search for.
-     * @return a <tt>Channel</tt> of this <tt>Content</tt>, which has
-     * <tt>ssrc</tt> in its list of received SSRCs, or <tt>null</tt> in case no
-     * such <tt>Channel</tt> exists.
-     */
-    public Channel findChannel(long ssrc)
-    {
-        // TODO we need to optimize the performance of this. We could use a
-        // simple Map as a Cache for this loop.
-        for (Channel channel : getChannels())
-        {
-            if (channel instanceof RtpChannel)
-            {
-                RtpChannel rtpChannel = (RtpChannel) channel;
-                for (int channelSsrc : rtpChannel.getReceiveSSRCs())
-                {
-                    if (ssrc == (0xffffffffL & channelSsrc))
-                        return channel;
-                }
-            }
-        }
-
-        return null;
     }
 
     /**
@@ -547,14 +576,18 @@ public class Content
         {
             //FIXME: fix instanceof
             if(!(channel instanceof RtpChannel))
+            {
                 continue;
+            }
 
             RtpChannel rtpChannel = (RtpChannel) channel;
 
             for (int channelReceiveSSRC : rtpChannel.getReceiveSSRCs())
             {
-                if (receiveSSRC == (0xFFFFFFFFL & channelReceiveSSRC))
+                if (receiveSSRC == (0xffff_ffffL & channelReceiveSSRC))
+                {
                     return channel;
+                }
             }
         }
         return null;
@@ -570,6 +603,25 @@ public class Content
         return
             Long.toHexString(
                     System.currentTimeMillis() + Videobridge.RANDOM.nextLong());
+    }
+
+    /**
+     * @return a new channel ID, unique in the list of this {@link Content}'s
+     * channels.
+     */
+    private String generateUniqueChannelID()
+    {
+        synchronized (channels)
+        {
+            String id;
+            do
+            {
+                id = generateChannelID();
+            }
+            while (channels.containsKey(id));
+
+            return id;
+        }
     }
 
     /**
@@ -605,7 +657,9 @@ public class Content
 
         // It seems the channel is still active.
         if (channel != null)
+        {
             channel.touch();
+        }
 
         return channel;
     }
@@ -619,20 +673,9 @@ public class Content
      */
     public int getChannelCount()
     {
-        int sz = 0;
-        Channel[] cs = getChannels();
-        if (cs != null && cs.length != 0)
-        {
-            for (int i = 0; i < cs.length; i++)
-            {
-                Channel c = cs[i];
-                if (c != null && !c.isExpired())
-                {
-                    sz++;
-                }
-            }
-        }
-        return sz;
+        return (int) getChannels().stream()
+            .filter(c -> c != null && !c.isExpired())
+            .count();
     }
 
     /**
@@ -640,13 +683,11 @@ public class Content
      *
      * @return the <tt>Channel</tt>s of this <tt>Content</tt>
      */
-    public Channel[] getChannels()
+    public List<Channel> getChannels()
     {
         synchronized (channels)
         {
-            Collection<Channel> values = channels.values();
-
-            return values.toArray(new Channel[values.size()]);
+            return new LinkedList<>(channels.values());
         }
     }
 
@@ -761,7 +802,10 @@ public class Content
      *
      * @return the <tt>Recorder</tt> instance used to record media for this
      * <tt>Content</tt>.
+     *
+     * @deprecated remove-with-recording
      */
+    @Deprecated
     public Recorder getRecorder()
     {
         if (recorder == null)
@@ -777,11 +821,6 @@ public class Content
             }
         }
         return recorder;
-    }
-
-    RTCPFeedbackMessageSender getRTCPFeedbackMessageSender()
-    {
-        return rtcpFeedbackMessageSender;
     }
 
     /**
@@ -816,7 +855,7 @@ public class Content
                         RTPTranslatorImpl rtpTranslatorImpl
                             = (RTPTranslatorImpl) rtpTranslator;
 
-                        /**
+                        /*
                          * XXX(gp) some thoughts on the use of initialLocalSSRC:
                          *
                          * 1. By using the initialLocalSSRC as the SSRC of the
@@ -830,12 +869,10 @@ public class Content
                          * The places that are involved in this have been tagged
                          * with TAG(cat4-local-ssrc-hurricane).
                          */
-                        initialLocalSSRC = Videobridge.RANDOM.nextLong() & 0xffffffffl;
+                        initialLocalSSRC
+                            = Videobridge.RANDOM.nextLong() & 0xffff_ffffL;
 
                         rtpTranslatorImpl.setLocalSSRC(initialLocalSSRC);
-
-                        rtcpFeedbackMessageSender
-                            = rtpTranslatorImpl.getRtcpFeedbackMessageSender();
                     }
                 }
             }
@@ -862,7 +899,10 @@ public class Content
      *
      * @return <tt>true</tt> if media recording for this <tt>Content</tt> is
      * currently enabled, and <tt>false</tt> otherwise.
+     *
+     * @deprecated remove-with-recording
      */
+    @Deprecated
     public boolean isRecording()
     {
         return recording;
@@ -878,7 +918,10 @@ public class Content
      *
      * @return the state of the media recording for this <tt>Content</tt>
      * after the attempt to enable (or disable).
+     *
+     * @deprecated remove-with-recording
      */
+    @Deprecated
     public boolean setRecording(boolean recording, String path)
     {
         this.recordingPath = path;
@@ -917,7 +960,10 @@ public class Content
      * @param recorder the <tt>Recorder</tt> to start.
      * @return <tt>true</tt> if <tt>recorder</tt> was started, <tt>false</tt>
      * otherwise.
+     *
+     * @deprecated remove-with-recording
      */
+    @Deprecated
     private boolean startRecorder(Recorder recorder)
     {
         boolean started = false;
@@ -928,14 +974,9 @@ public class Content
             recorder.start(format, recordingPath);
             started = true;
         }
-        catch (IOException ioe)
+        catch (IOException | MediaException ioe)
         {
             logger.error("Failed to start recorder: " + ioe);
-            started = false;
-        }
-        catch (MediaException me)
-        {
-            logger.error("Failed to start recorder: " + me);
             started = false;
         }
 
@@ -953,7 +994,9 @@ public class Content
         synchronized (this)
         {
             if (getLastActivityTime() < now)
+            {
                 lastActivityTime = now;
+            }
         }
     }
 
@@ -967,33 +1010,36 @@ public class Content
     }
 
     /**
-     * Tries to find an <tt>RtpChannel</tt> from this <tt>Content</tt> which
-     * has <tt>ssrc</tt> in one of its FID source groups.
-     * @param ssrc the SSRC to search for.
-     * @return an <tt>RtpChannel</tt> with <tt>ssrc</tt> in one of its FID
-     * source groups, or <tt>null</tt> if there is no such <tt>RtpChannel</tt>
-     * in this <tt>Content</tt>.
+     * @return a string which identifies this {@link Content} for the purposes
+     * of logging (i.e. includes the name of the content and ID of its
+     * conference). The string is a comma-separated list of "key=value" pairs.
      */
-    public RtpChannel findChannelByFidSsrc(long ssrc)
+    String getLoggingId()
     {
-        if (expired)
-            return null;
+        return loggingId;
+    }
 
-        for (Channel channel : getChannels())
-        {
-            if (! (channel instanceof RtpChannel))
-            {
-                continue;
-            }
-            RtpChannel rtpChannel = (RtpChannel) channel;
+    /**
+     * {@inheritDoc}
+     * </p>
+     * @return {@code true} if this {@link Content} is ready to be expired.
+     */
+    @Override
+    public boolean shouldExpire()
+    {
+        return
+            getChannels().isEmpty()
+                && getLastActivityTime() + 1000L * Channel.DEFAULT_EXPIRE
+                        < System.currentTimeMillis();
+    }
 
-            if (rtpChannel.getFidPairedSsrc(ssrc) != -1)
-            {
-                return rtpChannel;
-            }
-        }
-
-        return null;
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void safeExpire()
+    {
+        expireableImpl.safeExpire();
     }
 
     private static class RTPTranslatorWriteFilter
@@ -1004,8 +1050,8 @@ public class Content
         private final WeakReference<RTPTranslator.WriteFilter> writeFilter;
 
         public RTPTranslatorWriteFilter(
-                RTPTranslator rtpTranslator,
-                RTPTranslator.WriteFilter writeFilter)
+            RTPTranslator rtpTranslator,
+            RTPTranslator.WriteFilter writeFilter)
         {
             this.rtpTranslator = new WeakReference<>(rtpTranslator);
             this.writeFilter = new WeakReference<>(writeFilter);
@@ -1015,10 +1061,10 @@ public class Content
 
         @Override
         public boolean accept(
-                MediaStream source,
-                byte[] buffer, int offset, int length,
-                MediaStream destination,
-                boolean data)
+            MediaStream source,
+            RawPacket pkt,
+            MediaStream destination,
+            boolean data)
         {
             RTPTranslator.WriteFilter writeFilter = this.writeFilter.get();
             boolean accept = true;
@@ -1028,16 +1074,18 @@ public class Content
                 RTPTranslator rtpTranslator = this.rtpTranslator.get();
 
                 if (rtpTranslator != null)
+                {
                     rtpTranslator.removeWriteFilter(this);
+                }
             }
             else
             {
                 accept
                     = writeFilter.accept(
-                            source,
-                            buffer, offset, length,
-                            destination,
-                            data);
+                    source,
+                    pkt,
+                    destination,
+                    data);
             }
             return accept;
         }

@@ -15,18 +15,20 @@
  */
 package org.jitsi.videobridge.osgi;
 
-import java.io.*;
 import java.util.*;
 import org.ice4j.*;
+import org.ice4j.ice.harvest.*;
 import org.jitsi.impl.neomedia.device.*;
+import org.jitsi.impl.neomedia.rtp.remotebitrateestimator.*;
+import org.jitsi.impl.neomedia.rtp.sendsidebandwidthestimation.*;
 import org.jitsi.impl.neomedia.transform.csrc.*;
 import org.jitsi.impl.neomedia.transform.srtp.*;
 import org.jitsi.meet.*;
-import org.jitsi.service.configuration.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.service.packetlogging.*;
-import org.jitsi.util.*;
-import org.jitsi.videobridge.*;
+import org.jitsi.stats.media.*;
+import org.jitsi.videobridge.cc.*;
+import org.jitsi.videobridge.xmpp.*;
 
 /**
  * OSGi bundles description for the Jitsi Videobridge.
@@ -75,11 +77,7 @@ public class JvbBundleConfig
             "net/java/sip/communicator/service/protocol/media/ProtocolMediaActivator"
         },
         {
-            "org/jitsi/videobridge/eventadmin/influxdb/Activator",
             "org/jitsi/videobridge/eventadmin/callstats/Activator"
-        },
-        {
-            "org/jitsi/videobridge/eventadmin/metrics/MetricLoggingActivator"
         },
         {
             "org/jitsi/videobridge/VideobridgeBundleActivator"
@@ -92,6 +90,7 @@ public class JvbBundleConfig
             // level separate from Videobridge because the HTTP/JSON API is
             // useless if Videobridge fails to start.
             "org/jitsi/videobridge/rest/RESTBundleActivator",
+            "org/jitsi/videobridge/rest/PublicRESTBundleActivator",
             // The statistics/health reports are a non-vital, optional,
             // additional piece of functionality of the Videobridge.
             // Consequently, they do not have to be started before the
@@ -100,7 +99,11 @@ public class JvbBundleConfig
             // before the HTTP/JSON API because the HTTP/JSON API (1) exposes
             // the vital, non-optional, non-additional pieces of functionality
             // of the Videobridge and (2) it pulls, does not push.
-            "org/jitsi/videobridge/stats/StatsManagerBundleActivator"
+            "org/jitsi/videobridge/stats/StatsManagerBundleActivator",
+            "org/jitsi/videobridge/EndpointConnectionStatus"
+        },
+        {
+            "org/jitsi/videobridge/octo/OctoRelayService"
         }
     };
 
@@ -108,92 +111,6 @@ public class JvbBundleConfig
     protected String[][] getBundlesImpl()
     {
         return BUNDLES;
-    }
-
-    /**
-     * Sets the default {@code System} properties on which the
-     * callstats-java-sdk library depends.
-     *
-     * @param defaults the {@code Map} in which the default {@code System}
-     * properties on which the callstats-java-sdk library depends are to be
-     * defined
-     */
-    private void getCallStatsJavaSDKSystemPropertyDefaults(
-            Map<String, String> defaults)
-    {
-        getCallStatsJavaSDKSystemPropertyDefaults(
-                "log4j2.xml",
-                defaults,
-                "log4j.configurationFile");
-        getCallStatsJavaSDKSystemPropertyDefaults(
-                "callstats-java-sdk.properties",
-                defaults,
-                "callstats.configurationFile");
-    }
-
-    /**
-     * Sets the default {@code System} properties on which the
-     * callstats-java-sdk library depends.
-     *
-     * @param fileName
-     * @param defaults the {@code Map} in which the default {@code System}
-     * properties on which the callstats-java-sdk library depends are to be
-     * defined
-     * @param propertyName
-     */
-    private void getCallStatsJavaSDKSystemPropertyDefaults(
-            String fileName,
-            Map<String, String> defaults,
-            String propertyName)
-    {
-        // There are multiple locations in which we may have put the log4j2.xml
-        // file. The callstats-java-sdk library defaults to config/log4j2.xml in
-        // the current directory. And that is where we keep the file in our
-        // source tree so that works when running from source. Unfortunately,
-        // such a location may not work for us when we run from the .deb
-        // package.
-
-        List<File> files = new ArrayList<>();
-
-        // Look for log4j2.xml in known locations under the current working
-        // directory.
-        files.add(new File("config", fileName));
-        files.add(new File(fileName));
-
-        // Additionally, look for log4j2.xml in the same known locations under
-        // SC_HOME_DIR_LOCATION/SC_HOME_DIR_NAME because that is a directory
-        // known to Jitsi-derived projects.
-        String scHomeDirName
-            = System.getProperty(
-                    ConfigurationService.PNAME_SC_HOME_DIR_NAME);
-
-        if (!StringUtils.isNullOrEmpty(scHomeDirName))
-        {
-            String scHomeDirLocation
-                = System.getProperty(
-                        ConfigurationService.PNAME_SC_HOME_DIR_LOCATION);
-
-            if (!StringUtils.isNullOrEmpty(scHomeDirLocation))
-            {
-                File dir = new File(scHomeDirLocation, scHomeDirName);
-
-                if (dir.isDirectory())
-                {
-                    for (int i = 0, end = files.size(); i < end; ++i)
-                        files.add(new File(dir, files.get(i).getPath()));
-                }
-            }
-        }
-
-        // Pick the first existing log4j2.xml from the candidates defined above.
-        for (File file : files)
-        {
-            if (file.exists())
-            {
-                defaults.put(propertyName, file.getAbsolutePath());
-                break;
-            }
-        }
     }
 
     @Override
@@ -218,6 +135,20 @@ public class JvbBundleConfig
                 true_);
         defaults.put(SRTPCryptoContext.CHECK_REPLAY_PNAME, false_);
 
+        // Sends "consent freshness" check every 3 seconds
+        defaults.put(
+                StackProperties.CONSENT_FRESHNESS_INTERVAL, "3000");
+        // Retry every 500ms by setting original and max wait intervals
+        defaults.put(
+                StackProperties.CONSENT_FRESHNESS_ORIGINAL_WAIT_INTERVAL,
+                "500");
+        defaults.put(
+                StackProperties.CONSENT_FRESHNESS_MAX_WAIT_INTERVAL, "500");
+        // Retry max 5 times which will take up to 2500ms, that is before
+        // the next "consent freshness" transaction starts
+        defaults.put(
+                StackProperties.CONSENT_FRESHNESS_MAX_RETRANSMISSIONS, "5");
+
         // In the majority of use-cases the clients which connect to Jitsi
         // Videobridge are not in the same network, so we don't need to
         // advertise link-local addresses.
@@ -235,13 +166,27 @@ public class JvbBundleConfig
                 PacketLoggingConfiguration.PACKET_LOGGING_ENABLED_PROPERTY_NAME,
                 false_);
 
-        // Disable discarding of unused LastN streams. It is suspected to cause
-        // problems, and needs to be reworked to skip decryption but not drop
-        // packets in order to work with sequence number rewriting for lastN.
-        // It is safe to (temporary) disable because it is only an optimization.
+        // Configure the receive buffer size for the sockets used for the
+        // single-port mode to be 10MB.
+        defaults.put(AbstractUdpListener.SO_RCVBUF_PNAME, "10485760");
+
+        // Configure the starting send bitrate to be 2.5Mbps.
+        defaults.put(BandwidthEstimatorImpl.START_BITRATE_BPS_PNAME, "2500000");
+
+        // Enable picture ID rewriting by default, as jumping picture IDs cause
+        // recent versions of Chrome to crash.
         defaults.put(
-            VideoChannel.DISABLE_LASTN_UNUSED_STREAM_DETECTION,
-            true_);
+            SimulcastController.ENABLE_VP8_PICID_REWRITING_PNAME, true_);
+
+        // Trust the send side bandwidth estimations (which enables adaptivity)
+        // by default.
+        defaults.put(BitrateController.TRUST_BWE_PNAME, true_);
+
+        // Enable VP8 temporal scalability filtering by default.
+        defaults.put(MediaStreamTrackFactory.ENABLE_SVC_PNAME, true_);
+
+        // Enable AST RBE by default.
+        defaults.put(RemoteBitrateEstimatorWrapper.ENABLE_AST_RBE_PNAME, true_);
 
         // This causes RTP/RTCP packets received before the DTLS agent is ready
         // to decrypt them to be dropped. Without it, these packets are passed
@@ -258,8 +203,13 @@ public class JvbBundleConfig
         //            + ".dropUnencryptedPkts",
         //        true_);
 
+        // make sure we use the properties files for configuration
+        defaults.put(
+            "net.java.sip.communicator.impl.configuration.USE_PROPFILE_CONFIG",
+            true_);
+
         // callstats-java-sdk
-        getCallStatsJavaSDKSystemPropertyDefaults(defaults);
+        Utils.getCallStatsJavaSDKSystemPropertyDefaults(defaults);
 
         return defaults;
     }

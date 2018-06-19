@@ -19,7 +19,6 @@ import java.util.*;
 
 import org.ice4j.ice.*;
 import org.jitsi.eventadmin.*;
-import org.jitsi.influxdb.*;
 
 /**
  * A utility class with static methods which initialize <tt>Event</tt> instances
@@ -72,6 +71,14 @@ public class EventFactory
      */
     public static final String ENDPOINT_CREATED_TOPIC
         = "org/jitsi/videobridge/Endpoint/CREATED";
+
+    /**
+     * The name of the topic of a "message transport ready" event triggered on
+     * an endpoint instance when it's message transport connection is ready for
+     * sending/receiving data.
+     */
+    public static final String MSG_TRANSPORT_READY_TOPIC
+        = "org/jitsi/videobridge/Endpoint/MSG_TRANSPORT_READY_TOPIC";
 
     /**
      * The name of the topic of a "stream started" event.
@@ -190,7 +197,7 @@ public class EventFactory
      *
      * @return the <tt>Event</tt> which was created.
      */
-    public static Event endpointCreated(Endpoint endpoint)
+    public static Event endpointCreated(AbstractEndpoint endpoint)
     {
         return new Event(ENDPOINT_CREATED_TOPIC, makeProperties(endpoint));
     }
@@ -203,12 +210,30 @@ public class EventFactory
      *
      * @return the <tt>Event</tt> which was created.
      */
-    public static Event endpointDisplayNameChanged(Endpoint endpoint)
+    public static Event endpointDisplayNameChanged(AbstractEndpoint endpoint)
     {
         return
             new Event(
                     ENDPOINT_DISPLAY_NAME_CHANGED_TOPIC,
                     makeProperties(endpoint));
+    }
+
+    /**
+     * Creates a new "message transport ready" <tt>Event</tt>, which means that
+     * the endpoint passed in {@link #EVENT_SOURCE} property has now it's
+     * message transport connection established and ready for sending/receiving
+     * data.
+     *
+     * @param endpoint the endpoint for which the message transport is now ready
+     *
+     * @return the <tt>Event</tt> which was created.
+     */
+    public static Event endpointMessageTransportReady(AbstractEndpoint endpoint)
+    {
+        Dictionary<String, Object> properties = new Hashtable<>(1);
+
+        properties.put(EVENT_SOURCE, endpoint);
+        return new Event(MSG_TRANSPORT_READY_TOPIC, properties);
     }
 
     public static Event streamStarted(RtpChannel rtpChannel)

@@ -19,12 +19,19 @@ import net.sf.fmj.media.rtp.*;
 import org.jitsi.impl.neomedia.*;
 import org.jitsi.impl.neomedia.rtcp.*;
 import org.jitsi.impl.neomedia.rtp.*;
+import org.jitsi.impl.neomedia.transform.*;
+import org.jitsi.service.configuration.*;
+import org.jitsi.service.libjitsi.*;
 import org.jitsi.service.neomedia.*;
+import org.jitsi.service.neomedia.rtp.*;
 import org.jitsi.util.*;
+import org.jitsi.util.concurrent.*;
+import org.jitsi.util.function.*;
 
-import java.lang.ref.*;
 import java.util.*;
 import java.util.concurrent.*;
+
+import org.jitsi.service.neomedia.codec.*;
 
 /**
  * Implements a hack for
@@ -35,36 +42,89 @@ import java.util.concurrent.*;
  * @author George Politis
  */
 public class LipSyncHack
+    implements TransformEngine
 {
     /**
      * A byte array holding a black VP8 key frame. The byte array contains the
-     * full RTP packet and not just the VP8 payload.
+     * full RTP packet and not just the VP8 payload (160 bytes).
      */
-    private static final byte[] KEY_FRAME_BUFFER = new byte[]{ -112, -28,
-        64, 52,
-        -92, -96, 115, -79, -5, -111, 32, 79, -66, -34, 0, 1, 50, -63, 45, -124,
-        -112, -32, -3, 48, -17, 32, 16, 18, 0, -99, 1, 42, 64, 1, -76, 0, 57,
-        75, 0, 27, 28, 36, 12, 44, 44, 68, -52, 36, 65, 36, 1, 18, 76, 28, -95,
-        -109, 56, 60, 9, -105, 79, 38, -65, -37, -38, 32, -43, 37, -111, 4, -93,
-        68, 49, -67, -94, 13, -115, -45, 44, -110, 95, -61, 27, -38, 32, -40,
-        -35, -104, 123, -13, -109, 95, -19, -19, 16, 108, 110, -48, 63, 34, 13,
-        -115, -38, 18, -105, 63, 68, 49, -67, -95, -26, -101, 48, -9, -25, 38,
-        -19, 9, 75, -98, -86, -35, 50, -23, -31, 37, -111, 11, 39, -110, 82,
-        -108, 54, -115, -115, -38, 17, -60, 104, -122, 55, -79, 13, 55, 104, 74,
-        92, -3, 16, -58, -10, -120, 54, 55, 104, 74, 92, -4, 122, 109, 9, 75,
-        -98, -86, -35, 50, -55, -103, -126, 82, -105, 63, 68, 49, -68, 89, -55,
-        -69, 46, 0, -2, -78, 38, 50, -16, 47, -126, -99, -32, 50, 32, 67, 100,
-        0};
+    public static final byte[] KEY_FRAME_BUFFER = new byte[]{
+
+        // RTP
+        (byte) 0x90, (byte) 0xe4, (byte) 0x38, (byte) 0x25,
+        (byte) 0x53, (byte) 0x50, (byte) 0x6c, (byte) 0x8b,
+        (byte) 0x8e, (byte) 0x71, (byte) 0xf1, (byte) 0x72,
+        (byte) 0xbe, (byte) 0xde, (byte) 0x00, (byte) 0x01,
+        (byte) 0x32, (byte) 0x62, (byte) 0x45, (byte) 0xaa,
+
+        // VP8 PLD
+        (byte) 0x90, (byte) 0xe0, (byte) 0x80, (byte) 0x01,
+        (byte) 0x00, (byte) 0x20, (byte) 0x10, (byte) 0x0f,
+        (byte) 0x00, (byte) 0x9d, (byte) 0x01, (byte) 0x2a,
+        (byte) 0x40, (byte) 0x01, (byte) 0xb4, (byte) 0x00,
+        (byte) 0x07, (byte) 0x07, (byte) 0x09, (byte) 0x03,
+        (byte) 0x0b, (byte) 0x0b, (byte) 0x11, (byte) 0x33,
+        (byte) 0x09, (byte) 0x10, (byte) 0x4b, (byte) 0x00,
+        (byte) 0x00, (byte) 0x0c, (byte) 0x2c, (byte) 0x09,
+        (byte) 0xee, (byte) 0x0d, (byte) 0x02, (byte) 0xc9,
+        (byte) 0x3e, (byte) 0xd7, (byte) 0xb7, (byte) 0x36,
+        (byte) 0x4e, (byte) 0x70, (byte) 0xf6, (byte) 0x4e,
+        (byte) 0x70, (byte) 0xf6, (byte) 0x4e, (byte) 0x70,
+        (byte) 0xf6, (byte) 0x4e, (byte) 0x70, (byte) 0xf6,
+        (byte) 0x4e, (byte) 0x70, (byte) 0xf6, (byte) 0x4e,
+        (byte) 0x70, (byte) 0xf6, (byte) 0x4e, (byte) 0x70,
+        (byte) 0xf6, (byte) 0x4e, (byte) 0x70, (byte) 0xf6,
+        (byte) 0x4e, (byte) 0x70, (byte) 0xf6, (byte) 0x4e,
+        (byte) 0x70, (byte) 0xf6, (byte) 0x4e, (byte) 0x70,
+        (byte) 0xf6, (byte) 0x4e, (byte) 0x70, (byte) 0xf6,
+        (byte) 0x4e, (byte) 0x70, (byte) 0xf6, (byte) 0x4e,
+        (byte) 0x70, (byte) 0xf6, (byte) 0x4e, (byte) 0x70,
+        (byte) 0xf6, (byte) 0x4e, (byte) 0x70, (byte) 0xf6,
+        (byte) 0x4e, (byte) 0x70, (byte) 0xf6, (byte) 0x4e,
+        (byte) 0x70, (byte) 0xf6, (byte) 0x4e, (byte) 0x70,
+        (byte) 0xf6, (byte) 0x4e, (byte) 0x70, (byte) 0xf6,
+        (byte) 0x4e, (byte) 0x70, (byte) 0xf6, (byte) 0x4e,
+        (byte) 0x70, (byte) 0xf6, (byte) 0x4e, (byte) 0x70,
+        (byte) 0xf6, (byte) 0x4e, (byte) 0x70, (byte) 0xf6,
+        (byte) 0x4e, (byte) 0x70, (byte) 0xf6, (byte) 0x4e,
+        (byte) 0x70, (byte) 0xf6, (byte) 0x4e, (byte) 0x70,
+        (byte) 0xf6, (byte) 0x4e, (byte) 0x70, (byte) 0xf6,
+        (byte) 0x4e, (byte) 0x70, (byte) 0xf6, (byte) 0x4e,
+        (byte) 0x70, (byte) 0xf6, (byte) 0x4e, (byte) 0x70,
+        (byte) 0xf6, (byte) 0x4e, (byte) 0x5c, (byte) 0x00,
+        (byte) 0xfe, (byte) 0xef, (byte) 0xb9, (byte) 0x00
+    };
 
     /**
-     * A constant defining the maximum number of black key frames to send.
+     * Configuration property for  how many black key frames to send during an
+     * injection period.
      */
-    private static final int MAX_KEY_FRAMES = 10;
+    public final static String KEY_FRAMES_PER_INJECTION_PNAME
+        = "org.jitsi.videobridge.LipSyncHack.KEY_FRAMES_PER_INJECTION_PNAME";
 
     /**
-     * The rate (in ms) at which we are to send black key frames.
+     * Configuration property for the black key frames send period (in ms).
      */
-    private static final long KEY_FRAME_RATE_MS = 33 /* 1000 ms / 30 */;
+    public final static String PERIOD_MS_PNAME
+        = "org.jitsi.videobridge.LipSyncHack.PERIOD_MS_PNAME";
+
+    /**
+     * The <tt>ConfigurationService</tt> used to load LS hack configuration.
+     */
+    private final static ConfigurationService cfg
+        = LibJitsi.getConfigurationService();
+
+    /**
+     * A constant defining how many black key frames to send during an injection
+     * period.
+     */
+    private static final int KEY_FRAMES_PER_PERIOD
+        = cfg.getInt(KEY_FRAMES_PER_INJECTION_PNAME, 10);
+
+    /**
+     *  Black key frames send period (in ms).
+     */
+    private static final int PERIOD_MS = cfg.getInt(PERIOD_MS_PNAME, 500);
 
     /**
      * Timestamp increment per frame.
@@ -73,100 +133,105 @@ public class LipSyncHack
         = 90000 /* Hz */ / 30 /* fps */;
 
     /**
-     * Wait for media for WAIT_MS before sending frames.
-     */
-    private static final long WAIT_MS = 2000;
-
-    /**
      * The <tt>Logger</tt> used by the <tt>LipSyncHack</tt> class and
      * its instances to print debug information.
      */
     private static final Logger logger = Logger.getLogger(LipSyncHack.class);
 
     /**
-     * The value of {@link Logger#isWarnEnabled()} from the time of the
-     * initialization of the class {@code LipSyncHack} cached for the purposes
-     * of performance.
-     */
-    private static final boolean DEBUG = logger.isDebugEnabled();
-
-    /**
      * The {@link Random} that will be used to generate the random sequence
      * number and RTP timestamp offsets.
      */
-    private static final Random RANDOM = new Random();
+    private static final Random rnd = new Random();
 
     /**
-     * The owner of this hack.
+     * The <tt>RecurringRunnableExecutor</tt> to be utilized by the
+     * <tt>LipSyncHack</tt> class and its instances. It drives the injectors.
      */
-    private final Endpoint endpoint;
+    private final RecurringRunnableExecutor
+        recurringRunnableExecutor = new RecurringRunnableExecutor(
+        LipSyncHack.class.getSimpleName());
 
     /**
-     * The executor service that takes care of black key frame scheduling
-     * and injection.
+     * The {@link PacketTransformer} that rewrites RTP or prepends RTP streams
+     * with black key frames.
      */
-    private final ScheduledExecutorService scheduler =
-        Executors.newScheduledThreadPool(1);
+    private final RTPTransformer rtpTransformer = new RTPTransformer();
+
+    /**
+     * The {@link PacketTransformer} that rewrites RTCP.
+     */
+    private final RTCPTransformer rtcpTransformer = new RTCPTransformer();
+
+    /**
+     * Listens for RTCP report blocks and stops the injection if we receive an
+     * RTCP report for an SSRC that we're hacking.
+     */
+    private RTCPReportListener rtcpReportListener;
+
+    /**
+     * The owner (and, consequently, the destination) of this hack.
+     */
+    private final VideoChannel dest;
 
     /**
      * The remote audio SSRCs that have been accepted by the translator and
-     * forwarded to the endpoint associated to this instance.
+     * forwarded to the endpoint associated to this instance. Accessed by the
+     * audio translator thread only (no sync needed).
      */
     private final List<Long> acceptedAudioSSRCs = new ArrayList<>();
 
     /**
      * The remote video SSRCs that have been accepted by the translator and
-     * forwarded to the endpoint associated to this instance.
+     * forwarded to the endpoint associated to this instance. Accessed by the
+     * video translator thread only (no sync needed).
      */
-    private final List<Long> acceptedVideoSSRCsRTCP = new ArrayList<>();
-
-
-    /**
-     * The remote video SSRCs that have been accepted by the translator and
-     * forwarded to the endpoint associated to this instance.
-     */
-    private final List<Long> acceptedVideoSSRCsRTP = new ArrayList<>();
+    private final List<Long> acceptedVideoSSRCs = new ArrayList<>();
 
     /**
-     * A map that holds all the inject states.
+     * The sync root to synchronize the A/V translator write threads.
      */
-    private final Map<Long, InjectState> states = new HashMap<>();
+    private final Object filterSyncRoot = new Object();
+
+    /**
+     * The {@link Map} of SSRCs for which we've sent out black VP8 key frames.
+     */
+    private final Map<Long, Injection> injections = new HashMap<>();
+
+    /**
+     * The {@link Map} of transformations necessary per video SSRCs.
+     */
+    private final Map<Long, AbstractFunction<RawPacket, RawPacket>>
+        transformations = new ConcurrentHashMap<>();
+
+    /**
+     * The VP8 payload type.
+     */
+    private int vp8pt = -1;
 
     /**
      * Ctor.
      *
-     * @param endpoint the endpoint that owns this hack.
+     * @param dest the {@link VideoChannel} that owns this hack.
      */
-    public LipSyncHack(Endpoint endpoint)
+    LipSyncHack(VideoChannel dest)
     {
-        this.endpoint = endpoint;
+        this.dest = dest;
     }
 
     /**
      * Notifies this instance that an audio packet (RTP or RTCP) is about to be
-     * written.
+     * written. The purpose of this is to trigger the hack for the video stream
+     * that is associated to the audio SSRC that is about to be written.
      *
-     * @param data true if the buffer holds an RTP packet, false otherwise.
-     * @param buffer the buffer which contains the bytes of the received RTP or
-     * RTCP packet.
-     * @param offset the zero-based index in <tt>buffer</tt> at which the bytes
-     * of the received RTP or RTCP packet begin.
-     * @param length the number of bytes in <tt>buffer</tt> beginning at
-     * <tt>offset</tt> which represent the received RTP or RTCP packet.
+     * @param pkt the the received RTP or RTCP packet.
      * @param source the {@link Channel} where this packet came from.
      */
-    public void onRTPTranslatorWillWriteAudio(
-        boolean data, byte[] buffer, int offset,
-        int length, Channel source)
+    void onRTPTranslatorWillWriteAudio(
+        RawPacket pkt, RtpChannel source)
     {
-        if (!data)
-        {
-            return;
-        }
-
         // Decide whether to trigger the hack or not.
-        Long acceptedAudioSSRC
-            = RawPacket.getSSRCAsLong(buffer, offset, length);
+        Long acceptedAudioSSRC = pkt.getSSRCAsLong();
 
         // In order to minimize the synchronization overhead, we process
         // only the first data packet of a given RTP stream.
@@ -182,29 +247,33 @@ public class LipSyncHack
         }
 
         // New audio stream. Trigger the hack for the associated video stream.
-        List<RtpChannel> targetVideoChannels
-            = endpoint.getChannels(MediaType.VIDEO);
-        if (targetVideoChannels == null || targetVideoChannels.size() == 0)
+        MediaStream stream;
+        if (dest == null || (stream = dest.getStream()) == null
+            || !stream.isStarted())
         {
+            // It seems like we're not ready yet to trigger the hack.
             return;
         }
 
-        VideoChannel targetVC = (VideoChannel) targetVideoChannels.get(0);
-        if (targetVC == null)
+        MediaStreamTrackDesc[] sourceTracks
+            = source.getEndpoint().getMediaStreamTracks(MediaType.VIDEO);
+        if (ArrayUtils.isNullOrEmpty(sourceTracks))
         {
+            // It seems like we're not ready yet to trigger the hack.
             return;
         }
 
-        List<RtpChannel> sourceVideoChannels
-            = source.getEndpoint().getChannels(MediaType.VIDEO);
-        if (sourceVideoChannels == null || sourceVideoChannels.size() == 0)
+        RTPEncodingDesc[] sourceEncodings = sourceTracks[0].getRTPEncodings();
+        if (ArrayUtils.isNullOrEmpty(sourceEncodings))
         {
+            // It seems like we're not ready yet to trigger the hack.
             return;
         }
 
-        VideoChannel sourceVC = (VideoChannel) sourceVideoChannels.get(0);
-        if (sourceVC == null)
+        long receiveVideoSSRC = sourceEncodings[0].getPrimarySSRC();
+        if (receiveVideoSSRC < 0)
         {
+            // It seems like we're not ready yet to trigger the hack.
             return;
         }
 
@@ -214,372 +283,510 @@ public class LipSyncHack
         // audio channel will never reach this.
         acceptedAudioSSRCs.add(acceptedAudioSSRC);
 
-        // FIXME this is a little ugly
-        Long receiveVideoSSRC = sourceVC.getTransformEngine()
-            .getSimulcastEngine().getSimulcastReceiver()
-            .getSimulcastStream(0).getPrimarySSRC();
-
-        synchronized (states)
+        synchronized (filterSyncRoot)
         {
-            if (states.containsKey(receiveVideoSSRC))
+            if (acceptedVideoSSRCs.contains(receiveVideoSSRC)
+                || injections.containsKey(receiveVideoSSRC))
             {
-                // This receive video SSRC has already been processed.
+                // No need to hack this SSRC, as it's either already accepted
+                // (in other words, media has started flowing for this SSRC) or
+                // we're already injecting (since we have an injection).
+                //
+                // In either case, we don't want to start another injection
+                // task.
                 return;
             }
 
-            InjectState injectState = new InjectState(
-                receiveVideoSSRC, targetVC.getStream(), true);
+            Injection injection = new Injection(receiveVideoSSRC);
+            injections.put(receiveVideoSSRC, injection);
+            recurringRunnableExecutor.registerRecurringRunnable(injection);
 
-            states.put(receiveVideoSSRC, injectState);
-
-            InjectTask injectTask = new InjectTask(injectState);
-            injectTask.schedule();
+            if (rtcpReportListener == null)
+            {
+                // One way to stop the injection is to receive an RTCP report
+                // for the SSRC that we're hacking.
+                rtcpReportListener = new RTCPReportListener();
+                stream.getMediaStreamStats()
+                    .getRTCPReports().addRTCPReportListener(rtcpReportListener);
+            }
         }
+    }
+
+    /**
+     * Makes {@code sz} black key frame packets within the range specified by
+     * {@code seqNumOff}.
+     *
+     * @param ssrc the SSRC of the black key frame packets.
+     * @param seqNumOff the sequence number offset of the black key frame
+     * packets.
+     * @param tsOff the RTP timestamp offset of the black key frame packets.
+     * @param sz the number of black key frame packets to create.
+     * @return the array of black key frame packets that were created.
+     */
+    private RawPacket[] make(int ssrc, int seqNumOff, long tsOff, int sz)
+    {
+        if (vp8pt == -1)
+        {
+            vp8pt = dest.getStream()
+                .getDynamicRTPPayloadType(Constants.VP8) & 0xFF;
+        }
+
+        return make(ssrc, (byte) vp8pt, seqNumOff, tsOff, sz);
+    }
+
+    /**
+     * Makes {@code sz} black key frame packets within the range specified by
+     * {@code seqNumOff}.
+     *
+     * @param ssrc the SSRC of the black key frame packets.
+     * @param pt the VP8 payload type.
+     * @param seqNumOff the sequence number offset of the black key frame
+     * packets.
+     * @param tsOff the RTP timestamp offset of the black key frame packets.
+     * @param sz the number of black key frame packets to create.
+     * @return the array of black key frame packets that were created.
+     */
+    private static RawPacket[] make(
+        int ssrc, byte pt, int seqNumOff, long tsOff, int sz)
+    {
+        RawPacket[] kfs = new RawPacket[sz];
+        for (int i = 0; i < sz; i++)
+        {
+            // FIXME maybe grab from the write pool and copy the array?
+            byte[] buf = KEY_FRAME_BUFFER.clone();
+            kfs[i] = new RawPacket(buf, 0, buf.length);
+
+            // Set SSRC.
+            kfs[i].setSSRC(ssrc);
+
+            // Set payload type.
+            kfs[i].setPayloadType(pt);
+
+            // Set sequence number.
+            int seqnum = (seqNumOff + i) & 0xFFFF;
+            kfs[i].setSequenceNumber(seqnum);
+
+            // Set RTP timestamp.
+            long timestamp = (tsOff + i * TS_INCREMENT_PER_FRAME) & 0xFFFFFFFFL;
+            kfs[i].setTimestamp(timestamp);
+        }
+
+        return kfs;
     }
 
     /**
      * Notifies this instance that a video packet (RTP or RTCP) is about to be
-     * written.
+     * written. The purpose of this is to stop the hack for the SSRC that is
+     * about to be written.
      *
-     * @param data true if the buffer holds an RTP packet, false otherwise.
-     * @param buffer the buffer which contains the bytes of the received RTP or
-     * RTCP packet.
-     * @param offset the zero-based index in <tt>buffer</tt> at which the bytes
-     * of the received RTP or RTCP packet begin.
-     * @param length the number of bytes in <tt>buffer</tt> beginning at
-     * <tt>offset</tt> which represent the received RTP or RTCP packet.
-     * @param target the {@link Channel} where this packet is going.
+     * @param pkt the received RTP or RTCP packet.
+     * @param source the {@link RtpChannel} where this packet came from.
      */
-    public void onRTPTranslatorWillWriteVideo(
-        boolean accept, boolean data, byte[] buffer,
-        int offset, int length, Channel target)
+    void onRTPTranslatorWillWriteVideo(
+        RawPacket pkt, RtpChannel source)
     {
-        if (!accept)
+        Long acceptedVideoSSRC = pkt.getSSRCAsLong();
+
+        if (acceptedVideoSSRCs.contains(acceptedVideoSSRC))
         {
             return;
         }
 
-        Long acceptedVideoSSRC /* box early */;
-        long timestamp;
-        int seqnum;
-
-        if (data)
+        synchronized (filterSyncRoot)
         {
-            acceptedVideoSSRC
-                = RawPacket.getSSRCAsLong(buffer, offset, length);
+            acceptedVideoSSRCs.add(acceptedVideoSSRC);
 
-            // In order to minimize the synchronization overhead, we process
-            // only the first data packet of a given RTP stream.
-            //
-            // XXX No synchronization is required to r/w the acceptedVideoSSRCs
-            // because in the current architecture this method is called by a
-            // single thread at the time.
-            if (acceptedVideoSSRCsRTP.contains(acceptedVideoSSRC))
+            // Make sure we mark as accepted all simulcast SSRCs.
+            MediaStreamTrackDesc[] sourceTracks = source.getStream()
+                .getMediaStreamTrackReceiver().getMediaStreamTracks();
+
+            if (!ArrayUtils.isNullOrEmpty(sourceTracks))
             {
-                return;
-            }
-
-            acceptedVideoSSRCsRTP.add(acceptedVideoSSRC);
-
-            timestamp
-                = RawPacket.getTimestamp(buffer, offset, length);
-
-            seqnum
-                = RawPacket.getSequenceNumber(buffer, offset, length);
-        }
-        else
-        {
-            // The correct thing to do here is a loop because the RTCP packet
-            // can be compound. However, in practice we haven't seen multiple
-            // SRs being bundled in the same compound packet, and we're only
-            // interested in SRs.
-
-            // Check RTCP packet validity. This makes sure that pktLen > 0
-            // so this loop will eventually terminate.
-            if (!RTCPHeaderUtils.isValid(buffer, offset, length))
-            {
-                return;
-            }
-
-            int pktLen = RTCPHeaderUtils.getLength(buffer, offset, length);
-
-            int pt = RTCPHeaderUtils.getPacketType(buffer, offset, pktLen);
-            if (pt == RTCPPacket.SR)
-            {
-                acceptedVideoSSRC
-                    = RTCPHeaderUtils.getSenderSSRC(buffer, offset, pktLen);
-
-                // In order to minimize the synchronization overhead, we process
-                // only the first data packet of a given RTP stream.
-                //
-                // XXX No synchronization is required to r/w the acceptedVideoSSRCs
-                // because in the current architecture this method is called by
-                // a single thread at the time.
-                if (acceptedVideoSSRCsRTCP.contains(acceptedVideoSSRC))
+                RTPEncodingDesc[] sourceEncodings
+                    = sourceTracks[0].getRTPEncodings();
+                if (!ArrayUtils.isNullOrEmpty(sourceEncodings))
                 {
-                    return;
-                }
-
-                acceptedVideoSSRCsRTCP.add(acceptedVideoSSRC);
-
-                timestamp = RTCPSenderInfoUtils.getTimestamp(
-                    buffer, offset + RTCPHeader.SIZE, pktLen - RTCPHeader.SIZE);
-
-                seqnum = -1;
-            }
-            else
-            {
-                return;
-            }
-        }
-
-        final VideoChannel targetVC = (VideoChannel) target;
-        InjectState state;
-        synchronized (states)
-        {
-            state = states.get(acceptedVideoSSRC);
-            if (state == null)
-            {
-                // The hack has never been triggered for this stream.
-                states.put(acceptedVideoSSRC, new InjectState(acceptedVideoSSRC,
-                    targetVC.getStream(), false));
-
-                return;
-            }
-        }
-
-        synchronized (state)
-        {
-            // If we reached this point => state.active = true.
-            state.active = false;
-
-            if (state.numOfKeyframesSent == 0)
-            {
-                // No key frames have been sent for this SSRC => No need to
-                // rewrite anything.
-                return;
-            }
-
-            StreamRTPManager streamRTPManager
-                = targetVC.getStream().getStreamRTPManager();
-
-            ResumableStreamRewriter rewriter = streamRTPManager
-                .getResumableStreamRewriter(acceptedVideoSSRC);
-
-            if (timestamp != -1)
-            {
-                // Timestamps are calculated.
-                long highestTimestampSent = state.getNextTimestamp();
-
-                long lastTimestampDropped
-                    = (timestamp - TS_INCREMENT_PER_FRAME) & 0xffffffffl;
-                long timestampDelta =
-                    (lastTimestampDropped - highestTimestampSent) & 0xffffffffl;
-
-                // timestamps might have already been updated, due to the
-                // reception of RTCP.
-                if (rewriter.getHighestTimestampSent() == -1)
-                {
-                    rewriter.setHighestTimestampSent(highestTimestampSent);
-                }
-
-                if (rewriter.getTimestampDelta() == 0)
-                {
-                    rewriter.setTimestampDelta(timestampDelta);
+                    // Override the accepted SSRC to be the SSRC of the first
+                    // encoding, so that we can find the injection in the map.
+                    acceptedVideoSSRC = sourceEncodings[0].getPrimarySSRC();
+                    for (RTPEncodingDesc sourceEncoding : sourceEncodings)
+                    {
+                        long primarySSRC = sourceEncoding.getPrimarySSRC();
+                        if (primarySSRC > -1)
+                        {
+                            acceptedVideoSSRCs.add(primarySSRC);
+                        }
+                    }
                 }
             }
 
-            if (seqnum != -1)
+            Injection injectState = injections.get(acceptedVideoSSRC);
+            if (injectState == null)
             {
-                // Pretend we have dropped all the packets prior to the one
-                // that's about to be written by the translator.
-                int highestSeqnumSent = state.getNextSequenceNumber();
-
-                // Pretend we have dropped all the packets prior to the one
-                // that's about to be written by the translator.
-                int lastSeqnumDropped = RTPUtils.subtractNumber(seqnum, 1);
-                int seqnumDelta = RTPUtils.subtractNumber(
-                    lastSeqnumDropped, highestSeqnumSent);
-
-                rewriter.setHighestSequenceNumberSent(highestSeqnumSent);
-                rewriter.setSeqnumDelta(seqnumDelta);
+                // We haven't injected anything, our job here is done.
+                return;
             }
+
+            // We're getting media => stop the injection and add a translation
+            // for the outgoing media packets.
+
+            injectState.stop();
+            recurringRunnableExecutor.deRegisterRecurringRunnable(injectState);
+
+            int seqNum = pkt.getSequenceNumber();
+            long ts = pkt.getTimestamp();
+
+            // NOTE we reserve 10 slots for late media packets.
+            int seqNumDelta = (injectState.maxSeqNum + 10 - seqNum) & 0xFFFF;
+            long tsDelta = (injectState.maxTs
+                + 10 * TS_INCREMENT_PER_FRAME - ts) & 0xFFFFFFFFL;
+
+            if (logger.isDebugEnabled())
+            {
+                logger.debug("new_translation" +
+                    ",stream=" + dest.getStream().hashCode() +
+                    " ssrc=" + acceptedVideoSSRC +
+                    ",ts_delta=" + tsDelta +
+                    ",seq_num_delta=" + seqNumDelta);
+            }
+
+            // Setup packet transformation.
+            transformations.put(acceptedVideoSSRC,
+                new SeqNumPacketTranslation(seqNumDelta)
+                    .andThen(new TimestampPacketTranslation(tsDelta)));
         }
     }
 
     /**
-     * The {@link Runnable} that injects the black video key frame packets.
+     * {@inheritDoc}
      */
-    class InjectTask implements Runnable
+    @Override
+    public PacketTransformer getRTPTransformer()
+    {
+        return rtpTransformer;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public PacketTransformer getRTCPTransformer()
+    {
+        return rtcpTransformer;
+    }
+
+    /**
+     *
+     */
+    private class RTPTransformer
+        implements PacketTransformer
     {
         /**
-         * The state for this injector.
+         * {@inheritDoc}
          */
-        private final InjectState injectState;
-
-        /**
-         * The {@link ScheduledFuture} for this task.
-         */
-        private ScheduledFuture<?> scheduledFuture;
-
-        /**
-         * Ctor.
-         *
-         * @param injectState
-         */
-        public InjectTask(InjectState injectState)
+        @Override
+        public void close()
         {
-            this.injectState = injectState;
+            recurringRunnableExecutor.close();
+
+            if (rtcpReportListener != null)
+            {
+                dest.getStream().getMediaStreamStats().getRTCPReports()
+                    .removeRTCPReportListener(rtcpReportListener);
+            }
         }
 
         /**
          * {@inheritDoc}
          */
         @Override
-        public void run()
+        public RawPacket[] reverseTransform(RawPacket[] pkts)
         {
-            synchronized (injectState)
-            {
-                if (!injectState.active
-                    || injectState.numOfKeyframesSent >= MAX_KEY_FRAMES)
-                {
-                    scheduledFuture.cancel(true);
-                    return;
-                }
-
-                MediaStream mediaStream = injectState.target.get();
-                if (mediaStream == null || !mediaStream.isStarted())
-                {
-                    if (DEBUG)
-                    {
-                        logger.debug("Waiting for the media stream to become" +
-                            "available.");
-                    }
-                    return;
-                }
-
-                try
-                {
-                    injectState.numOfKeyframesSent++;
-
-                    // FIXME maybe grab from the write pool and copy the array?
-                    byte[] buf = KEY_FRAME_BUFFER.clone();
-                    RawPacket keyframe = new RawPacket(buf, 0, buf.length);
-
-                    // Set SSRC.
-                    keyframe.setSSRC(injectState.ssrc.intValue());
-
-                    // Set sequence number.
-                    int seqnum = injectState.getNextSequenceNumber();
-                    keyframe.setSequenceNumber(seqnum);
-
-                    // Set RTP timestamp.
-                    long timestamp = injectState.getNextTimestamp();
-                    keyframe.setTimestamp(timestamp);
-
-                    if (DEBUG)
-                    {
-                        logger.debug("Injecting black key frame ssrc="
-                            + injectState.ssrc + ", seqnum="
-                            + seqnum + ", timestamp="
-                            + timestamp + ", streamHashCode="
-                            + mediaStream.hashCode());
-                    }
-
-                    mediaStream.injectPacket(keyframe, true, null);
-                }
-                catch (TransmissionFailedException e)
-                {
-                    injectState.numOfKeyframesSent--;
-                    logger.error(e);
-                }
-            }
+            return pkts;
         }
 
         /**
-         * Schedules this instance for execution at a fixed rate.
+         * {@inheritDoc}
          */
-        public void schedule()
+        @Override
+        public RawPacket[] transform(RawPacket[] pkts)
         {
-            this.scheduledFuture = scheduler.scheduleAtFixedRate(
-                this, WAIT_MS , KEY_FRAME_RATE_MS, TimeUnit.MILLISECONDS);
+            if (ArrayUtils.isNullOrEmpty(pkts))
+            {
+                return pkts;
+            }
+
+            RawPacket[] cumulExtras = null;
+            for (int i = 0; i < pkts.length; i++)
+            {
+                if (pkts[i] == null
+                    || !RTPPacketPredicate.INSTANCE.test(pkts[i]))
+                {
+                    continue;
+                }
+
+                Long ssrc = pkts[i].getSSRCAsLong();
+                AbstractFunction<RawPacket, RawPacket>
+                    transformation = transformations.get(ssrc);
+
+                if (transformation == null)
+                {
+                    // if we have an injection, then that means that at this
+                    // point we MUST have a transformation (because before
+                    // reaching this point, we MUST have accepted the ssrc, and
+                    // that needs to have stopped the injection and added a
+                    // transformation).
+                    assert !injections.containsKey(ssrc);
+
+                    // Mark that this RTP stream has been prepended so that we
+                    // don't run this block again.
+                    transformation = RawPacketTransformation.identity;
+
+                    // Prepend.
+                    int seqNumOff = (pkts[i].getSequenceNumber() - 10) & 0xFFFF;
+                    long tsOff = (pkts[i].getTimestamp()
+                        - 10 * TS_INCREMENT_PER_FRAME) & 0xFFFFFFFFL;
+                    RawPacket[] extras = make(
+                        ssrc.intValue(), seqNumOff, tsOff, 10);
+
+                    cumulExtras = ArrayUtils.concat(cumulExtras, extras);
+
+                    if (logger.isDebugEnabled())
+                    {
+                        logger.debug("new_translation" +
+                            ",stream=" + dest.getStream().hashCode() +
+                            " ssrc=" + ssrc +
+                            ",pt=" + vp8pt +
+                            ",ts_delta=0,seq_num_delta=0");
+                    }
+
+                    transformations.put(ssrc, transformation);
+                }
+
+                pkts[i] = transformation.apply(pkts[i]);
+            }
+
+            return ArrayUtils.concat(cumulExtras, pkts);
         }
     }
 
     /**
-     * The RTP state of every monitored video SSRC.
+     *
      */
-    static class InjectState
+    private class RTCPTransformer
+        extends SinglePacketTransformerAdapter
     {
         /**
-         * The SSRC to send black key frames with.
+         * Ctor.
          */
-        private final Long ssrc;
-
-        /**
-         * The target to inject RTP packets to.
-         */
-        private final WeakReference<MediaStream> target;
-
-        /**
-         * The random offset for the sequence numbers.
-         */
-        private final int seqnumOffset;
-
-        /**
-         * The random offset for the RTP timestamps.
-         */
-        private final long timestampOffset;
-
-        /**
-         * True if no real video packets have been received for this SSRC, false
-         * otherwise.
-         */
-        private boolean active;
-
-        /**
-         * The number of key frames that have already been sent.
-         */
-        private int numOfKeyframesSent = 0;
-
-        /**
-         * Gets the next sequence number to use based on the number of key
-         * frames that have already been sent.
-         *
-         * @return the next sequence number to use based on the number of key
-         * frames that have already been sent.
-         */
-        public int getNextSequenceNumber()
+        RTCPTransformer()
         {
-            return (seqnumOffset + numOfKeyframesSent) & 0xffff;
+            super(RTCPPacketPredicate.INSTANCE);
         }
 
         /**
-         * Gets the next timestamp to use based on the number of key frames
-         * that have already been sent.
-         *
-         * @return Gets the next timestamp to use based on the number of key
-         * frames that have already been sent.
+         * {@inheritDoc}
          */
-        public long getNextTimestamp()
+        @Override
+        public RawPacket transform(RawPacket pkt)
         {
-            return (timestampOffset
-                + numOfKeyframesSent * TS_INCREMENT_PER_FRAME) & 0xffffffffl;
-        }
+            if (injections.isEmpty())
+            {
+                return pkt;
+            }
 
+            switch (RTCPUtils.getPacketType(pkt))
+            {
+            case RTCPPacket.SR:
+                long ssrc = RawPacket.getRTCPSSRC(pkt);
+                AbstractFunction<RawPacket, RawPacket>
+                    transformation = transformations.get(ssrc);
+
+                if (transformation != null)
+                {
+                    return transformation.apply(pkt);
+                }
+                break;
+            }
+
+            return pkt;
+        }
+    }
+
+    /**
+     *
+     */
+    private class Injection
+        implements RecurringRunnable
+    {
         /**
          * Ctor.
          *
-         * @param ssrc
-         * @param target
+         * @param receiveVideoSSRC
          */
-        public InjectState(Long ssrc, MediaStream target, boolean active)
+        Injection(long receiveVideoSSRC)
         {
-            this.ssrc = ssrc;
-            this.active = active;
-            this.target = new WeakReference<>(target);
-            this.seqnumOffset = RANDOM.nextInt(0xffff);
-            this.timestampOffset = RANDOM.nextInt() & 0xffffffffl;
+            this.receiveVideoSSRC = receiveVideoSSRC;
+        }
+
+        /**
+         *
+         */
+        final long receiveVideoSSRC;
+
+        /**
+         * The maximum sequence number (mod 2^16) that has been sent out by
+         * this injector instance.
+         */
+        int maxSeqNum = -1;
+
+        /**
+         * The maximum RTP timstamp (mod 2^32) that has been sent out by
+         * this injector instance.
+         */
+        long maxTs = -1;
+
+        /**
+         * A boolean indicating whether or not this instance is still injecting
+         * packets.
+         */
+        boolean running = true;
+
+        /**
+         * The last time in milliseconds at which {@link #run} was invoked.
+         */
+        long lastRunMs = -1;
+
+        /**
+         *
+         */
+        @Override
+        public long getTimeUntilNextRun()
+        {
+            if (!running)
+            {
+                return Long.MAX_VALUE;
+            }
+
+            long timeSinceLastProcess
+                = Math.max(System.currentTimeMillis() - lastRunMs, 0);
+
+            return Math.max(PERIOD_MS - timeSinceLastProcess, 0);
+        }
+
+        /**
+         *
+         */
+        @Override
+        public void run()
+        {
+            if (!running)
+            {
+                return;
+            }
+
+            lastRunMs = System.currentTimeMillis();
+
+            MediaStream stream = dest.getStream();
+            if (stream == null)
+            {
+                return;
+            }
+
+            // This is synchronized with the stop method (which updates the
+            // running field). The stop method is invoked when the video
+            // translator thread receives a video RTP packet and right before
+            // the maxSeqNum and maxTs fields are accessed by the video
+            // translator write thread.
+
+            // The idea here is to serialize r/w of maxSeqNum and maxTs, to make
+            // sure the video translator thread is not using an outdated
+            // maxSeqNum value.
+            synchronized (this)
+            {
+                if (!running)
+                {
+                    return;
+                }
+
+                if (maxSeqNum == -1)
+                {
+                    // Init (pretend we've sent maxSeqNum and maxTs).
+                    maxSeqNum = rnd.nextInt(0xFFFF);
+                    maxTs = rnd.nextInt() & 0xFFFFFFFFL;
+                }
+                else
+                {
+                    // Pre-allocate KEY_FRAMES_PER_PERIOD spots and exit the
+                    // synchronize block to minimize contention.
+                    maxSeqNum = (maxSeqNum + KEY_FRAMES_PER_PERIOD) & 0xFFFF;
+                    maxTs = (maxTs
+                        + KEY_FRAMES_PER_PERIOD * TS_INCREMENT_PER_FRAME)
+                            & 0xFFFFFFFFL;
+                }
+            }
+
+            long tsOff
+                = (maxTs - (KEY_FRAMES_PER_PERIOD - 1) * TS_INCREMENT_PER_FRAME)
+                    & 0xFFFFFFFFL;
+
+            int seqNumOff = (maxSeqNum - KEY_FRAMES_PER_PERIOD - 1) & 0xFFFF;
+            RawPacket[] kfs = make(
+                (int) receiveVideoSSRC, seqNumOff, tsOff, KEY_FRAMES_PER_PERIOD);
+
+            for (int i = 0; i < KEY_FRAMES_PER_PERIOD; i++)
+            {
+                try
+                {
+                    stream.injectPacket(kfs[i], true, LipSyncHack.this);
+                }
+                catch (TransmissionFailedException e)
+                {
+                    logger.error("failed to inject a black keyframe.", e);
+                }
+            }
+
+            if (logger.isDebugEnabled())
+            {
+                logger.debug("new_injection" +
+                    ",stream=" + stream.hashCode() +
+                    " ssrc=" + receiveVideoSSRC +
+                    ",max_ts=" + kfs[kfs.length - 1].getTimestamp() +
+                    ",max_seq_num=" + kfs[kfs.length - 1].getSequenceNumber());
+            }
+        }
+
+        /**
+         * After stop is called, the injection logic is stopped and maxSeqNum
+         * and maxTs will not be further modified.
+         */
+        public synchronized void stop()
+        {
+            running = false;
+        }
+    }
+
+    class RTCPReportListener
+        extends RTCPReportAdapter
+    {
+        /**
+         * {@inheritDoc}
+         */
+        @Override
+        public void rtcpReportReceived(RTCPReport report)
+        {
+            for (RTCPFeedback feedback : report.getFeedbackReports())
+            {
+                long ssrc = feedback.getSSRC();
+                Injection injection = injections.get(ssrc);
+                if (injection != null
+                    && !transformations.containsKey(ssrc))
+                {
+                    // NOTE if we have a transformation that means that we're no
+                    // longer injecting that SSRC.
+                    injection.stop();
+                }
+            }
         }
     }
 }

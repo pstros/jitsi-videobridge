@@ -20,12 +20,12 @@ import java.net.*;
 import java.nio.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.logging.*;
 
 import net.java.sip.communicator.impl.protocol.jabber.extensions.jingle.*;
 
 import org.ice4j.socket.*;
 import org.ice4j.util.*;
-import org.jitsi.impl.neomedia.*;
 import org.jitsi.impl.neomedia.transform.dtls.*;
 import org.jitsi.impl.osgi.framework.*;
 import org.jitsi.sctp4j.*;
@@ -239,22 +239,21 @@ public class SctpConnection
     public SctpConnection(
             String id,
             Content content,
-            Endpoint endpoint,
+            AbstractEndpoint endpoint,
             int remoteSctpPort,
             String channelBundleId,
             Boolean initiator)
         throws Exception
     {
-        super(
-                content,
-                id,
-                channelBundleId,
-                IceUdpTransportPacketExtension.NAMESPACE,
-                initiator);
+        super(content,
+              id,
+              channelBundleId,
+              IceUdpTransportPacketExtension.NAMESPACE,
+              initiator);
 
         logger
             = Logger.getLogger(classLogger, content.getConference().getLogger());
-        setEndpoint(endpoint.getID());
+        setEndpoint(endpoint);
         packetQueue
             = new RawPacketQueue(
                 false,
@@ -262,7 +261,7 @@ public class SctpConnection
                 handler);
 
         this.remoteSctpPort = remoteSctpPort;
-        this.debugId = generateDebugId();
+        debugId = generateDebugId();
     }
 
     /**
@@ -499,14 +498,7 @@ public class SctpConnection
         if (!isExpired())
         {
             eventDispatcher.execute(
-                    new Runnable()
-                    {
-                        @Override
-                        public void run()
-                        {
-                            notifyChannelOpenedInEventDispatcher(dataChannel);
-                        }
-                    });
+                () -> notifyChannelOpenedInEventDispatcher(dataChannel));
         }
     }
 
@@ -522,7 +514,9 @@ public class SctpConnection
             if (ls != null)
             {
                 for (WebRtcDataStreamListener l : ls)
+                {
                     l.onChannelOpened(this, dataChannel);
+                }
             }
         }
     }
@@ -536,14 +530,7 @@ public class SctpConnection
         if (!isExpired())
         {
             eventDispatcher.execute(
-                    new Runnable()
-                    {
-                        @Override
-                        public void run()
-                        {
-                            notifySctpConnectionReadyInEventDispatcher();
-                        }
-                    });
+                this::notifySctpConnectionReadyInEventDispatcher);
         }
     }
 
@@ -564,8 +551,10 @@ public class SctpConnection
 
             if (ls != null)
             {
-                for(WebRtcDataStreamListener l : ls)
+                for (WebRtcDataStreamListener l : ls)
+                {
                     l.onSctpConnectionReady(this);
+                }
             }
         }
     }
@@ -602,8 +591,9 @@ public class SctpConnection
         {
             if (logger.isDebugEnabled())
             {
-                logger.debug(
-                        getEndpoint().getID() + " ACK received SID: " + sid);
+                logger.debug(Logger.Category.STATISTICS,
+                             "sctp_ack_received," + getLoggingId()
+                                + " sid=" + sid);
             }
             // Open channel ACK
             WebRtcDataStream channel = channels.get(sid);
@@ -611,22 +601,26 @@ public class SctpConnection
             {
                 // Ack check prevents from firing multiple notifications
                 // if we get more than one ACKs (by mistake/bug).
-                if(!channel.isAcknowledged())
+                if (!channel.isAcknowledged())
                 {
                     channel.ackReceived();
                     notifyChannelOpened(channel);
                 }
                 else
                 {
-                    logger.warn("Redundant ACK received for SID: " + sid);
+                    logger.log(Level.WARNING, Logger.Category.STATISTICS,
+                                 "sctp_redundant_ack_received," + getLoggingId()
+                                     + " sid=" + sid);
                 }
             }
             else
             {
-                logger.error("No channel exists on sid: "+sid);
+                logger.error(Logger.Category.STATISTICS,
+                           "sctp_no_channel_for_sid," + getLoggingId()
+                               + " sid=" + sid);
             }
         }
-        else if(messageType == MSG_OPEN_CHANNEL)
+        else if (messageType == MSG_OPEN_CHANNEL)
         {
             int channelType = /* 1 byte unsigned integer */ 0xFF & buffer.get();
             int priority
@@ -665,18 +659,22 @@ public class SctpConnection
 
             if (logger.isDebugEnabled())
             {
-                logger.debug(
-                            getEndpoint().getID()
-                            + " data channel open request on SID: " + sid
-                            + " type: " + channelType + " prio: " + priority
-                            + " reliab: " + reliability + " label: " + label
-                            + " proto: " + protocol);
+                logger.debug(Logger.Category.STATISTICS,
+                           "dc_open_request," + getLoggingId()
+                           + " sid=" + sid
+                           + ",type=" + channelType
+                           + ",prio=" + priority
+                           + ",reliab=" + reliability
+                           + ",label=" + label
+                           + ",proto=" + protocol);
             }
 
             WebRtcDataStream.DataCallback oldCallback = null;
             if (channels.containsKey(sid))
             {
-                logger.warn("Channel on sid: " + sid + " already exists");
+                logger.log(Level.WARNING, Logger.Category.STATISTICS,
+                           "sctp_channel_exists," + getLoggingId()
+                           + " sid=" + sid);
                 oldCallback = channels.get(sid).getDataCallback();
             }
 
@@ -703,14 +701,19 @@ public class SctpConnection
      * {@inheritDoc}
      */
     @Override
-    protected void onEndpointChanged(Endpoint oldValue, Endpoint newValue)
+    protected void onEndpointChanged(
+        AbstractEndpoint oldValue, AbstractEndpoint newValue)
     {
         super.onEndpointChanged(oldValue, newValue);
 
-        if (oldValue != null)
-            oldValue.setSctpConnection(null);
-        if (newValue != null)
-            newValue.setSctpConnection(this);
+        if (oldValue != null && oldValue instanceof Endpoint)
+        {
+            ((Endpoint) oldValue).setSctpConnection(null);
+        }
+        if (newValue != null && newValue instanceof Endpoint)
+        {
+            ((Endpoint) newValue).setSctpConnection(this);
+        }
     }
 
     /**
@@ -724,8 +727,15 @@ public class SctpConnection
         {
             if (logger.isDebugEnabled())
             {
-                logger.debug(
-                        "socket=" + socket + "; notification=" + notification);
+                // SCTP_SENDER_DRY_EVENT is logged too often. It means that the
+                // data queue is now empty and we don't care.
+                if (SctpNotification.SCTP_SENDER_DRY_EVENT
+                    != notification.sn_type)
+                {
+                    logger.info(Logger.Category.STATISTICS,
+                                "sctp_notification," + getLoggingId()
+                                    + " notification=" + notification);
+                }
             }
 
             switch (notification.sn_type)
@@ -768,7 +778,7 @@ public class SctpConnection
             byte[] data, int sid, int ssn, int tsn, long ppid, int context,
             int flags)
     {
-        if(ppid == WEB_RTC_PPID_CTRL)
+        if (ppid == WEB_RTC_PPID_CTRL)
         {
             // Channel control PPID
             try
@@ -780,7 +790,7 @@ public class SctpConnection
                 logger.error("IOException when processing ctrl packet", e);
             }
         }
-        else if(ppid == WEB_RTC_PPID_STRING || ppid == WEB_RTC_PPID_BIN)
+        else if (ppid == WEB_RTC_PPID_STRING || ppid == WEB_RTC_PPID_BIN)
         {
             WebRtcDataStream channel;
 
@@ -789,12 +799,12 @@ public class SctpConnection
                 channel = channels.get(sid);
             }
 
-            if(channel == null)
+            if (channel == null)
             {
                 logger.error("No channel found for sid: " + sid);
                 return;
             }
-            if(ppid == WEB_RTC_PPID_STRING)
+            if (ppid == WEB_RTC_PPID_STRING)
             {
                 // WebRTC String
                 String str;
@@ -919,7 +929,7 @@ public class SctpConnection
         // Protocol Length
         packet.putShort((short) protocolByteLength);
         // Label
-        if(labelByteLength != 0)
+        if (labelByteLength != 0)
             packet.put(labelBytes, 0, labelByteLength);
         // Protocol
         if (protocolByteLength != 0)
@@ -959,9 +969,10 @@ public class SctpConnection
     private void runOnDtlsTransport(StreamConnector connector)
         throws IOException
     {
-        DtlsControlImpl dtlsControl
-            = getTransportManager().getDtlsControl(this);
-        DtlsTransformEngine engine = dtlsControl.getTransformEngine();
+        SrtpControl srtpControl
+            = getTransportManager().getSrtpControl(this);
+        DtlsTransformEngine engine
+            = (DtlsTransformEngine) srtpControl.getTransformEngine();
         DtlsPacketTransformer transformer
             = (DtlsPacketTransformer) engine.getRTPTransformer();
         if (this.transformer == null)
@@ -971,7 +982,7 @@ public class SctpConnection
 
         byte[] receiveBuffer = new byte[SCTP_BUFFER_SIZE];
 
-        if(LOG_SCTP_PACKETS)
+        if (LOG_SCTP_PACKETS)
         {
             System.setProperty(
                     ConfigurationService.PNAME_SC_HOME_DIR_LOCATION,
@@ -1108,7 +1119,11 @@ public class SctpConnection
                 if (send == null || send.length == 0)
                     continue;
 
-                if(LOG_SCTP_PACKETS)
+                // We received data for the SCTP socket, this SctpConnection
+                // is still alive
+                touch(ActivityType.PAYLOAD);
+
+                if (LOG_SCTP_PACKETS)
                 {
                     PacketLoggingService pktLogging
                         = LibJitsi.getPacketLoggingService();
@@ -1148,8 +1163,11 @@ public class SctpConnection
         }
         catch (SocketException ex)
         {
-            if (!"Socket closed".equals(ex.getMessage()))
+            if (!"Socket closed".equals(ex.getMessage())
+                && !(ex instanceof SocketClosedException))
+            {
                 throw ex;
+            }
         }
         finally
         {
