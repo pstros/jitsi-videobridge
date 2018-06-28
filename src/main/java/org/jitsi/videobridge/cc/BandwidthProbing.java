@@ -21,6 +21,7 @@ import org.jitsi.impl.neomedia.transform.*;
 import org.jitsi.service.configuration.*;
 import org.jitsi.service.libjitsi.*;
 import org.jitsi.service.neomedia.*;
+import org.jitsi.service.neomedia.codec.*;
 import org.jitsi.util.*;
 import org.jitsi.util.concurrent.*;
 import org.jitsi.videobridge.*;
@@ -52,7 +53,15 @@ public class BandwidthProbing
      * The {@link Logger} to be used by this instance to print debug
      * information.
      */
-    private static final Logger logger = Logger.getLogger(BandwidthProbing.class);
+    private static final Logger logger
+        = Logger.getLogger(BandwidthProbing.class);
+
+    /**
+     * The {@link TimeSeriesLogger} to be used by this instance to print time
+     * series.
+     */
+    private static final TimeSeriesLogger timeSeriesLogger
+        = TimeSeriesLogger.getTimeSeriesLogger(BandwidthProbing.class);
 
     /**
      * The ConfigurationService to get config values from.
@@ -78,6 +87,11 @@ public class BandwidthProbing
      * The {@link VideoChannel} to probe for available send bandwidth.
      */
     private final VideoChannel dest;
+
+    /**
+     * The VP8 payload type to use when probing with the SSRC of the bridge.
+     */
+    private int vp8PT = -1;
 
     /**
      * The sequence number to use if probing with the JVB's SSRC.
@@ -112,10 +126,14 @@ public class BandwidthProbing
         MediaStream destStream = dest.getStream();
         if (destStream == null
             || (destStream.getDirection() != null
-                && !destStream.getDirection().allowsSending()))
+                && !destStream.getDirection().allowsSending())
+            || !(destStream instanceof VideoMediaStreamImpl))
         {
             return;
         }
+
+        VideoMediaStreamImpl videoStreamImpl
+            = (VideoMediaStreamImpl) destStream;
 
         List<SimulcastController> simulcastControllerList
             = dest.getBitrateController().getSimulcastControllers();
@@ -141,8 +159,7 @@ public class BandwidthProbing
             }
 
             long currentBps = sourceTrack
-                .getBps(simulcastController.getCurrentIndex(),
-                    true /* performTimeoutCheck */);
+                .getBps(simulcastController.getCurrentIndex());
 
             if (currentBps > 0)
             {
@@ -155,12 +172,10 @@ public class BandwidthProbing
                 }
             }
 
-            totalTargetBps += simulcastController
-                .getSource().getBps(simulcastController.getTargetIndex(),
-                    true /* performTimeoutCheck */);
-            totalOptimalBps += simulcastController
-                .getSource().getBps(simulcastController.getOptimalIndex(),
-                    true /* performTimeoutCheck */);
+            totalTargetBps += sourceTrack.getBps(
+                    simulcastController.getTargetIndex());
+            totalOptimalBps += sourceTrack.getBps(
+                    simulcastController.getOptimalIndex());
         }
 
         // How much padding do we need?
@@ -172,14 +187,14 @@ public class BandwidthProbing
             return;
         }
 
-        long bweBps = ((VideoMediaStream) destStream)
+        long bweBps = videoStreamImpl
             .getOrCreateBandwidthEstimator().getLatestEstimate();
 
         if (totalOptimalBps <= bweBps)
         {
             // it seems like the optimal bps fits in the bandwidth estimation,
             // let's update the bitrate controller.
-            dest.getBitrateController().update(null, bweBps);
+            dest.getBitrateController().update(bweBps);
             return;
         }
 
@@ -187,16 +202,19 @@ public class BandwidthProbing
         long maxPaddingBps = bweBps - Math.max(totalTargetBps, totalCurrentBps);
         long paddingBps = Math.min(totalNeededBps, maxPaddingBps);
 
-        if (logger.isDebugEnabled())
+        if (timeSeriesLogger.isTraceEnabled())
         {
-            logger.debug("padding,stream="+ destStream.hashCode()
-                + " padding_bps=" + paddingBps
-                + ",optimal_bps=" + totalOptimalBps
-                + ",current_bps=" + totalCurrentBps
-                + ",target_bps=" + totalTargetBps
-                + ",needed_bps=" + totalNeededBps
-                + ",max_padding_bps=" + maxPaddingBps
-                + ",bwe_bps=" + bweBps);
+            DiagnosticContext diagnosticContext
+                = videoStreamImpl.getDiagnosticContext();
+            timeSeriesLogger.trace(diagnosticContext
+                    .makeTimeSeriesPoint("out_padding")
+                    .addField("padding_bps", paddingBps)
+                    .addField("optimal_bps", totalOptimalBps)
+                    .addField("current_bps", totalCurrentBps)
+                    .addField("target_bps", totalTargetBps)
+                    .addField("needed_bps", totalNeededBps)
+                    .addField("max_padding_bps", maxPaddingBps)
+                    .addField("bwe_bps", bweBps));
         }
 
         if (paddingBps < 1)
@@ -232,7 +250,17 @@ public class BandwidthProbing
 
         // Send crap with the JVB's SSRC.
         long mediaSSRC = getSenderSSRC();
-        int pt = 100; // VP8 pt.
+        if (vp8PT == -1)
+        {
+            vp8PT = stream.getDynamicRTPPayloadType(Constants.VP8);
+            if (vp8PT == -1)
+            {
+                logger.warn("The VP8 payload type is undefined. Failed to "
+                        + "probe with the SSRC of the bridge.");
+                return;
+            }
+        }
+
         ts += 3000;
 
         int pktLen = RawPacket.FIXED_HEADER_SIZE + 0xFF;
@@ -244,7 +272,7 @@ public class BandwidthProbing
             {
                 // These packets should not be cached.
                 RawPacket pkt
-                    = RawPacket.makeRTP(mediaSSRC, pt, seqNum++, ts, pktLen);
+                    = RawPacket.makeRTP(mediaSSRC, vp8PT, seqNum++, ts, pktLen);
 
                 stream.injectPacket(pkt, /* data */ true, rtxTransformer);
             }

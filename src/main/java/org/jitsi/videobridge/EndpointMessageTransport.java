@@ -15,14 +15,16 @@
  */
 package org.jitsi.videobridge;
 
-import org.jitsi.service.neomedia.*;
+import org.jitsi.eventadmin.*;
 import org.jitsi.util.*;
 import org.jitsi.videobridge.rest.*;
 import org.json.simple.*;
-import org.json.simple.parser.*;
 
 import java.io.*;
+import java.lang.ref.*;
 import java.util.*;
+
+import static org.jitsi.videobridge.EndpointMessageBuilder.*;
 
 /**
  * Handles the functionality related to sending and receiving COLIBRI messages
@@ -32,62 +34,9 @@ import java.util.*;
  * @author Boris Grozev
  */
 class EndpointMessageTransport
+    extends AbstractEndpointMessageTransport
     implements WebRtcDataStream.DataCallback
 {
-    /**
-     * The {@link Videobridge#COLIBRI_CLASS} value indicating a
-     * {@code SelectedEndpointChangedEvent}.
-     */
-    public static final String COLIBRI_CLASS_SELECTED_ENDPOINT_CHANGED
-        = "SelectedEndpointChangedEvent";
-
-    /**
-     * The {@link Videobridge#COLIBRI_CLASS} value indicating a
-     * {@code SelectedEndpointChangedEvent}.
-     */
-    public static final String COLIBRI_CLASS_SELECTED_ENDPOINTS_CHANGED
-        = "SelectedEndpointsChangedEvent";
-
-    /**
-     * The {@link Videobridge#COLIBRI_CLASS} value indicating a
-     * {@code PinnedEndpointChangedEvent}.
-     */
-    public static final String COLIBRI_CLASS_PINNED_ENDPOINT_CHANGED
-        = "PinnedEndpointChangedEvent";
-
-    /**
-     * The {@link Videobridge#COLIBRI_CLASS} value indicating a
-     * {@code PinnedEndpointsChangedEvent}.
-     */
-    public static final String COLIBRI_CLASS_PINNED_ENDPOINTS_CHANGED
-        = "PinnedEndpointsChangedEvent";
-
-    /**
-     * The {@link Videobridge#COLIBRI_CLASS} value indicating a
-     * {@code ClientHello} message.
-     */
-    public static final String COLIBRI_CLASS_CLIENT_HELLO
-        = "ClientHello";
-
-    /**
-     * The {@link Videobridge#COLIBRI_CLASS} value indicating a
-     * {@code LastNChangedEvent}.
-     */
-    public static final String COLIBRI_CLASS_LASTN_CHANGED
-        = "LastNChangedEvent";
-
-    /**
-     * The {@link Videobridge#COLIBRI_CLASS} value indicating a
-     * {@code EndpointMessage}.
-     */
-    public static final String COLIBRI_CLASS_ENDPOINT_MESSAGE
-        = "EndpointMessage";
-
-    /**
-     * The string which encodes a COLIBRI {@code ServerHello} message.
-     */
-    private static final String SERVER_HELLO_STR
-        = "{\"colibriClass\":\"ServerHello\"}";
 
     /**
      * The {@link Logger} used by the {@link Endpoint} class to print debug
@@ -127,34 +76,97 @@ class EndpointMessageTransport
     private boolean webSocketLastActive = false;
 
     /**
+     * SCTP connection bound to this endpoint.
+     */
+    private WeakReference<SctpConnection> sctpConnection
+        = new WeakReference<>(null);
+
+    /**
+     * The listener which will be added to {@link SctpConnection}s associated
+     * with this endpoint, which will be notified when {@link SctpConnection}s
+     * become ready.
+     *
+     * Note that we just want to make sure that the initial messages (e.g.
+     * a dominant speaker notification) are sent. Because of this we only add
+     * listeners to {@link SctpConnection}s which are not yet ready, and we
+     * remove the listener after an {@link SctpConnection} becomes ready.
+     */
+    private final WebRtcDataStreamListener webRtcDataStreamListener
+        = new WebRtcDataStreamListener()
+    {
+        @Override
+        public void onSctpConnectionReady(
+            SctpConnection source)
+        {
+            if (source != null)
+            {
+                if (source.equals(getSctpConnection()))
+                {
+                    try
+                    {
+                        WebRtcDataStream dataStream
+                            = source.getDefaultDataStream();
+                        dataStream.setDataCallback(EndpointMessageTransport.this);
+                        notifyTransportChannelConnected();
+                    }
+                    catch (IOException e)
+                    {
+                        logger.error("Could not get the default data stream.", e);
+                    }
+                }
+                source.removeChannelListener(this);
+            }
+        }
+    };
+
+    /**
      * Initializes a new {@link EndpointMessageTransport} instance.
      * @param endpoint the associated {@link Endpoint}.
      */
     EndpointMessageTransport(Endpoint endpoint)
     {
-        this.endpoint = Objects.requireNonNull(endpoint, "endpoint");
+        super(endpoint);
+        this.endpoint = endpoint;
         this.logger
             = Logger.getLogger(
                     classLogger, endpoint.getConference().getLogger());
     }
 
     /**
-     * Notifies this {@code Endpoint} that a {@code ClientHello} has been
-     * received.
-     *
-     * @param src the transport channel on which {@code jsonObject} has
-     * been received
-     * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
-     * {@code ClientHello} which has been received by the associated
-     * {@code SctpConnection}
+     * {@inheritDoc}
      */
-    private void onClientHello(Object src, JSONObject jsonObject)
+    @Override
+    protected void notifyTransportChannelConnected()
+    {
+        EventAdmin eventAdmin = endpoint.getConference().getEventAdmin();
+
+        if (eventAdmin != null)
+        {
+            eventAdmin.postEvent(
+                EventFactory.endpointMessageTransportReady(endpoint));
+        }
+
+        endpoint.getConference().endpointMessageTransportConnected(endpoint);
+
+        for (RtpChannel channel : endpoint.getChannels())
+        {
+            channel.endpointMessageTransportConnected();
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    protected void onClientHello(Object src, JSONObject jsonObject)
     {
         // ClientHello was introduced for functional testing purposes. It
         // triggers a ServerHello response from Videobridge. The exchange
         // reveals (to the client) that the transport channel between the
         // remote endpoint and the Videobridge is operational.
-        sendMessage(src, SERVER_HELLO_STR, "response to ClientHello");
+        // We take care to send the reply using the same transport channel on
+        // which we received the request..
+        sendMessage(src, createServerHelloEvent(), "response to ClientHello");
     }
 
     /**
@@ -222,161 +234,19 @@ class EndpointMessageTransport
     private void sendMessage(
         ColibriWebSocket dst, String message, String errorMessage)
     {
-        try
-        {
-            dst.getRemote().sendString(message);
-            endpoint.getConference().getVideobridge().getStatistics()
-                .totalColibriWebSocketMessagesSent.incrementAndGet();
-        }
-        catch (IOException ioe)
-        {
-            logger.error(
-                "Failed to send a message over a WebSocket (endpoint="
-                    + endpoint.getID() + "): " + errorMessage,
-                ioe);
-        }
-    }
-
-    /**
-     * Notifies this {@code Endpoint} that a specific JSON object has been
-     * received.
-     *
-     * @param src the transport channel by which the specified
-     * {@code jsonObject} has been received.
-     * @param jsonObject the JSON data received by {@code src}.
-     * @param colibriClass the non-{@code null} value of the mandatory JSON
-     * property {@link Videobridge#COLIBRI_CLASS} required of all JSON objects
-     * received.
-     */
-    private void onJSONData(
-        Object src,
-        JSONObject jsonObject,
-        String colibriClass)
-    {
-        switch (colibriClass)
-        {
-        case COLIBRI_CLASS_SELECTED_ENDPOINT_CHANGED:
-            onSelectedEndpointChangedEvent(src, jsonObject);
-            break;
-        case COLIBRI_CLASS_SELECTED_ENDPOINTS_CHANGED:
-            onSelectedEndpointsChangedEvent(src, jsonObject);
-            break;
-        case COLIBRI_CLASS_PINNED_ENDPOINT_CHANGED:
-            onPinnedEndpointChangedEvent(src, jsonObject);
-            break;
-        case COLIBRI_CLASS_PINNED_ENDPOINTS_CHANGED:
-            onPinnedEndpointsChangedEvent(src, jsonObject);
-            break;
-        case COLIBRI_CLASS_CLIENT_HELLO:
-            onClientHello(src, jsonObject);
-            break;
-        case COLIBRI_CLASS_ENDPOINT_MESSAGE:
-            onClientEndpointMessage(src, jsonObject);
-            break;
-        case COLIBRI_CLASS_LASTN_CHANGED:
-            onLastNChangedEvent(src, jsonObject);
-            break;
-        default:
-            break;
-        }
+        // We'll use the async version of sendString since this may be called
+        // from multiple threads.  It's just fire-and-forget though, so we
+        // don't wait on the result
+        dst.getRemote().sendStringByFuture(message);
+        endpoint.getConference().getVideobridge().getStatistics()
+            .totalColibriWebSocketMessagesSent.incrementAndGet();
     }
 
     /**
      * {@inheritDoc}
      */
     @Override
-    public void onBinaryData(WebRtcDataStream src, byte[] data)
-    {
-    }
-
-    /**
-     * Handles an opaque message from this {@code Endpoint} that should be
-     * forwarded to either: a) another client in this conference (1:1
-     * message) or b) all other clients in this conference (broadcast message)
-     *
-     * @param src the transport channel on which {@code jsonObject} has
-     * been received.
-     * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
-     * {@code EndpointMessage} which has been received.
-     *
-     * EndpointMessage definition:
-     * 'to': If the 'to' field contains the endpoint id of another endpoint
-     * in this conference, the message will be treated as a 1:1 message and
-     * forwarded just to that endpoint. If the 'to' field is an empty
-     * string, the message will be treated as a broadcast and sent to all other
-     * endpoints in this conference.
-     * 'msgPayload': An opaque payload. The bridge does not need to know or
-     * care what is contained in the 'msgPayload' field, it will just forward
-     * it blindly.
-     *
-     * NOTE: This message is designed to allow endpoints to pass their own
-     * application-specific messaging to one another without requiring the
-     * bridge to know of or understand every message type. These messages
-     * will be forwarded by the bridge using the same transport channel as other
-     * jitsi messages (e.g. active speaker and last-n notifications).
-     * It is not recommended to send high-volume message traffic on this
-     * channel (e.g. file transfer), such that it may interfere with other
-     * jitsi messages.
-     */
-    @SuppressWarnings("unchecked")
-    private void onClientEndpointMessage(
-        Object src,
-        JSONObject jsonObject)
-    {
-        String to = (String)jsonObject.get("to");
-        jsonObject.put("from", endpoint.getID());
-        Conference conference = endpoint.getConference();
-        if (conference == null || conference.isExpired())
-        {
-            logger.warn(
-                "Unable to send EndpointMessage, conference is null or expired");
-            return;
-        }
-
-        if ("".equals(to))
-        {
-            // Broadcast message
-            List<Endpoint> endpointSubset = new ArrayList<>();
-            for (Endpoint e : conference.getEndpoints())
-            {
-                if (!endpoint.getID().equalsIgnoreCase(e.getID()))
-                {
-                    endpointSubset.add(e);
-                }
-            }
-            conference.sendMessage(
-                jsonObject.toString(), endpointSubset);
-        }
-        else
-        {
-            // 1:1 message
-            Endpoint targetEndpoint = conference.getEndpoint(to);
-            if (targetEndpoint != null)
-            {
-                List<Endpoint> endpointSubset = new ArrayList<>();
-                endpointSubset.add(targetEndpoint);
-                conference.sendMessage(
-                    jsonObject.toString(), endpointSubset);
-            }
-            else
-            {
-                logger.warn(
-                    "Unable to find endpoint " + to
-                        + " to send EndpointMessage");
-            }
-        }
-    }
-
-    /**
-     * Notifies this {@code Endpoint} that a {@code PinnedEndpointChangedEvent}
-     * has been received.
-     *
-     * @param src the transport channel by which {@code jsonObject} has
-     * been received.
-     * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
-     * {@code PinnedEndpointChangedEvent} which has been received.
-     */
-    private void onPinnedEndpointChangedEvent(
+    protected void onPinnedEndpointChangedEvent(
         Object src,
         JSONObject jsonObject)
     {
@@ -393,15 +263,9 @@ class EndpointMessageTransport
     }
 
     /**
-     * Notifies this {@code Endpoint} that a {@code PinnedEndpointsChangedEvent}
-     * has been received.
-     *
-     * @param src the transport channel by which {@code jsonObject} has
-     * been received
-     * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
-     * {@code PinnedEndpointChangedEvent} which has been received.
+     * {@inheritDoc}
      */
-    private void onPinnedEndpointsChangedEvent(
+    protected void onPinnedEndpointsChangedEvent(
         Object src,
         JSONObject jsonObject)
     {
@@ -434,15 +298,10 @@ class EndpointMessageTransport
     }
 
     /**
-     * Notifies this {@code Endpoint} that a {@code SelectedEndpointChangedEvent}
-     * has been received.
-     *
-     * @param src the transport channel by which {@code jsonObject} has
-     * been received.
-     * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
-     * {@code SelectedEndpointChangedEvent} which has been received.
+     * {@inheritDoc}
      */
-    private void onSelectedEndpointChangedEvent(
+    @Override
+    protected void onSelectedEndpointChangedEvent(
         Object src,
         JSONObject jsonObject)
     {
@@ -459,15 +318,10 @@ class EndpointMessageTransport
     }
 
     /**
-     * Notifies this {@code Endpoint} that a
-     * {@code SelectedEndpointsChangedEvent} has been received.
-     *
-     * @param src the transport channel by which {@code jsonObject} has
-     * been received
-     * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
-     * {@code SelectedEndpointChangedEvent} which has been received.
+     * {@inheritDoc}
      */
-    private void onSelectedEndpointsChangedEvent(
+    @Override
+    protected void onSelectedEndpointsChangedEvent(
         Object src,
         JSONObject jsonObject)
     {
@@ -493,32 +347,6 @@ class EndpointMessageTransport
     }
 
     /**
-     * Notifies this {@code Endpoint} that a {@code LastNChangedEvent}
-     * has been received.
-     *
-     * @param src the transport channel by which {@code jsonObject} has been
-     * received.
-     * @param jsonObject the JSON object with {@link Videobridge#COLIBRI_CLASS}
-     * {@code LastNChangedEvent} which has been received.
-     */
-    private void onLastNChangedEvent(
-        Object src,
-        JSONObject jsonObject)
-    {
-        // Find the new value for LastN.
-        Object o = jsonObject.get("lastN");
-        if (!(o instanceof Number))
-        {
-            return;
-        }
-        int lastN = ((Number) o).intValue();
-
-        for (RtpChannel channel : endpoint.getChannels(MediaType.VIDEO)) {
-            channel.setLastN(lastN);
-        }
-    }
-
-    /**
      * {@inheritDoc}
      */
     @Override
@@ -532,57 +360,10 @@ class EndpointMessageTransport
     }
 
     /**
-     * Notifies this {@link EndpointMessageTransport} that a specific message
-     * has been received on a specific transport channel.
-     * @param src the transport channel on which the message has been received.
-     * @param msg the message which has been received.
+     * {@inheritDoc}
      */
-    private void onMessage(Object src, String msg)
-    {
-        Object obj;
-        JSONParser parser = new JSONParser(); // JSONParser is NOT thread-safe.
-
-        try
-        {
-            obj = parser.parse(msg);
-        }
-        catch (ParseException ex)
-        {
-            logger.warn(
-                    "Malformed JSON received from endpoint " + endpoint.getID(),
-                    ex);
-            obj = null;
-        }
-
-        // We utilize JSONObjects only.
-        if (obj instanceof JSONObject)
-        {
-            JSONObject jsonObject = (JSONObject) obj;
-            // We utilize JSONObjects with colibriClass only.
-            String colibriClass = (String)jsonObject.get(Videobridge.COLIBRI_CLASS);
-
-            if (colibriClass != null)
-            {
-                onJSONData(src, jsonObject, colibriClass);
-            }
-            else
-            {
-                logger.warn(
-                    "Malformed JSON received from endpoint " + endpoint.getID()
-                        + ". JSON object does not contain the colibriClass"
-                        + " field.");
-            }
-        }
-    }
-
-    /**
-     * Sends a specific message over the active transport channels of this
-     * {@link EndpointMessageTransport}.
-     *
-     * @param msg message text to send.
-     * @throws IOException
-     */
-    void sendMessage(String msg)
+    @Override
+    protected void sendMessage(String msg)
         throws IOException
     {
         Object dst = getActiveTransportChannel();
@@ -610,7 +391,7 @@ class EndpointMessageTransport
     private Object getActiveTransportChannel()
         throws IOException
     {
-        SctpConnection sctpConnection = endpoint.getSctpConnection();
+        SctpConnection sctpConnection = getSctpConnection();
         ColibriWebSocket webSocket = this.webSocket;
         String endpointId = endpoint.getID();
 
@@ -670,8 +451,10 @@ class EndpointMessageTransport
 
             webSocket = ws;
             webSocketLastActive = true;
-            sendMessage(ws, SERVER_HELLO_STR, "initial ServerHello");
+            sendMessage(ws, createServerHelloEvent(), "initial ServerHello");
         }
+
+        notifyTransportChannelConnected();
     }
 
     /**
@@ -700,6 +483,29 @@ class EndpointMessageTransport
     }
 
     /**
+     * {@inheritDoc}
+     */
+    @Override
+    protected void close()
+    {
+        synchronized (webSocketSyncRoot)
+        {
+            if (webSocket != null)
+            {
+                // 410 Gone indicates that the resource requested is no longer
+                // available and will not be available again.
+                webSocket.getSession().close(410, "replaced");
+                webSocket = null;
+                if (logger.isDebugEnabled())
+                {
+                    logger.debug(
+                        "Endpoint expired, closed colibri web-socket.");
+                }
+            }
+        }
+    }
+
+    /**
      * Notifies this {@link EndpointMessageTransport} that a message has been
      * received from a specific {@link ColibriWebSocket} instance associated
      * with its {@link Endpoint}.
@@ -719,5 +525,52 @@ class EndpointMessageTransport
 
         webSocketLastActive = true;
         onMessage(ws, message);
+    }
+
+    /**
+     * @return the {@link SctpConnection} associated with this endpoint.
+     */
+    SctpConnection getSctpConnection()
+    {
+        return sctpConnection.get();
+    }
+
+    /**
+     * Sets the {@link SctpConnection} associated with this endpoint.
+     * @param sctpConnection the new {@link SctpConnection}.
+     */
+    void setSctpConnection(SctpConnection sctpConnection)
+    {
+        SctpConnection oldValue = getSctpConnection();
+
+        if (!Objects.equals(oldValue, sctpConnection))
+        {
+            if (oldValue != null && sctpConnection != null)
+            {
+                // This is not necessarily invalid, but with the current
+                // codebase it likely indicates a problem. If we start to
+                // actually use it, this warning should be removed.
+                logger.warn("Replacing an Endpoint's SctpConnection.");
+            }
+
+            this.sctpConnection = new WeakReference<>(sctpConnection);
+
+            if (sctpConnection != null)
+            {
+                if (sctpConnection.isReady())
+                {
+                    notifyTransportChannelConnected();
+                }
+                else
+                {
+                    sctpConnection.addChannelListener(webRtcDataStreamListener);
+                }
+            }
+
+            if (oldValue != null)
+            {
+                oldValue.removeChannelListener(webRtcDataStreamListener);
+            }
+        }
     }
 }

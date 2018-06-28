@@ -17,13 +17,11 @@ package org.jitsi.videobridge;
 
 import java.beans.*;
 import java.io.*;
-import java.net.*;
 import java.util.*;
 
 import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
 import net.java.sip.communicator.impl.protocol.jabber.extensions.jingle.*;
 
-import org.ice4j.util.*;
 import org.jitsi.impl.neomedia.*;
 import org.jitsi.impl.neomedia.rtp.*;
 import org.jitsi.impl.neomedia.rtp.translator.*;
@@ -36,7 +34,8 @@ import org.jitsi.util.*;
 import org.jitsi.util.Logger; // Disambiguation.
 import org.jitsi.util.concurrent.*;
 import org.jitsi.videobridge.cc.*;
-import org.json.simple.*;
+
+import static org.jitsi.videobridge.EndpointMessageBuilder.*;
 
 /**
  * Implements an <tt>RtpChannel</tt> with <tt>MediaType.VIDEO</tt>.
@@ -47,13 +46,6 @@ import org.json.simple.*;
 public class VideoChannel
     extends RtpChannel
 {
-    /**
-     * The length in milliseconds of the interval for which the average incoming
-     * bitrate for this video channel will be computed and made available
-     * through {@link #getIncomingBitrate}.
-     */
-    private static final int INCOMING_BITRATE_INTERVAL_MS = 5000;
-
     /**
      * The name of the property used to disable LastN notifications.
      */
@@ -77,7 +69,8 @@ public class VideoChannel
         = "org.jitsi.videobridge.DISABLE_NACK_TERMINATION";
 
     /**
-     * Configuration property for number of streams to cache
+     * The Java system property name that holds the boolean that indicates
+     * whether or not to enable the lipsync hack.
      */
     final static String ENABLE_LIPSYNC_HACK_PNAME
         = VideoChannel.class.getName() + ".ENABLE_LIPSYNC_HACK";
@@ -112,6 +105,25 @@ public class VideoChannel
             ? new int[0] : new int[] { 1, 2 };
 
     /**
+     * The default value that indicates whether or not to enable the lipsync
+     * hack.
+     */
+    private static final boolean ENABLE_LIPSYNC_HACK_DEFAULT = false;
+
+    /**
+     * The value that indicates whether or not to enable the lipsync hack.
+     */
+    private static final boolean ENABLE_LIPSYNC_HACK
+        = cfg != null && cfg.getBoolean(
+            ENABLE_LIPSYNC_HACK_PNAME, ENABLE_LIPSYNC_HACK_DEFAULT);
+
+    /**
+     * The default maximum frame height (in pixels) that can be forwarded to
+     * this participant
+     */
+    private static final int MAX_FRAME_HEIGHT_DEFAULT = 2160;
+
+    /**
      * The {@link Logger} used by the {@link VideoChannel} class to print debug
      * information. Note that instances should use {@link #logger} instead.
      */
@@ -142,6 +154,11 @@ public class VideoChannel
     private final LipSyncHack lipSyncHack;
 
     /**
+     * Maximum frame height, in pixels, for any video stream forwarded to this receiver
+     */
+    private int maxFrameHeight = MAX_FRAME_HEIGHT_DEFAULT;
+
+    /**
      * @return the {@link RecurringRunnableExecutor} instance for
      * {@link VideoChannel}s. Uses lazy initialization.
      */
@@ -170,14 +187,6 @@ public class VideoChannel
      */
     private final BandwidthProbing bandwidthProbing
         = new BandwidthProbing(this);
-
-    /**
-     * The instance which will be computing the incoming bitrate for this
-     * <tt>VideoChannel</tt>.
-     * @deprecated We should use the statistics from the media stream for this.
-     */
-    private final RateStatistics incomingBitrate
-        = new RateStatistics(INCOMING_BITRATE_INTERVAL_MS, 8000F);
 
     /**
      * The {@link Logger} to be used by this instance to print debug
@@ -243,9 +252,7 @@ public class VideoChannel
                     classLogger,
                     content.getConference().getLogger());
 
-        this.lipSyncHack
-            = cfg != null && cfg.getBoolean(ENABLE_LIPSYNC_HACK_PNAME, true)
-            ? new LipSyncHack(this) : null;
+        this.lipSyncHack = ENABLE_LIPSYNC_HACK ? new LipSyncHack(this) : null;
 
         disableLastNNotifications = cfg != null
             && cfg.getBoolean(DISABLE_LASTN_NOTIFICATIONS_PNAME, false);
@@ -273,10 +280,24 @@ public class VideoChannel
     protected void maybeStartStream()
         throws IOException
     {
-        boolean previouslyStarted = getStream().isStarted();
+        MediaStream stream = getStream();
+        boolean previouslyStarted
+            = stream != null ? stream.isStarted() : false;
+
         super.maybeStartStream();
 
-        if(getStream().isStarted() && !previouslyStarted)
+        // If a recvonly channel is created, existing streams won't be
+        // forwarded to it until the next keyframe comes in.
+        // bitrateController.update gets called before ICE has completed so the
+        // keyframe comes in before this channel is actually started. So update
+        // the bitrate controller when the stream starts which will request a
+        // keyframe from other channels if needed.
+
+        stream = getStream();
+        boolean currentlyStarted
+            = stream != null ? stream.isStarted() : false;
+
+        if (currentlyStarted && !previouslyStarted)
         {
             bitrateController.update(null, -1);
         }
@@ -286,32 +307,9 @@ public class VideoChannel
      * {@inheritDoc}
      */
     @Override
-    public boolean setRtpEncodingParameters(
-        List<SourcePacketExtension> sources,
-        List<SourceGroupPacketExtension> sourceGroups)
+    protected void updateBitrateController()
     {
-        boolean changed = super.setRtpEncodingParameters(sources, sourceGroups);
-
-        if (changed)
-        {
-            Channel[] peerChannels = getContent().getChannels();
-            if (!ArrayUtils.isNullOrEmpty(peerChannels))
-            {
-                for (Channel peerChannel : peerChannels)
-                {
-                    if (peerChannel == this
-                    || !(peerChannel instanceof VideoChannel))
-                    {
-                        continue;
-                    }
-
-                    ((VideoChannel) peerChannel)
-                        .bitrateController.update(null, -1);
-                }
-            }
-        }
-
-        return changed;
+        bitrateController.update();
     }
 
     /**
@@ -323,18 +321,6 @@ public class VideoChannel
         return DEFAULT_RTCP_RECV_REPORT_SSRCS;
     }
 
-    /**
-     * {@inheritDoc}
-     *
-     * Creates media stream.
-     */
-    @Override
-    public void initialize()
-        throws IOException
-    {
-        initialize(null);
-    }
-
     @Override
     void initialize(RTPLevelRelayType rtpLevelRelayType)
         throws IOException
@@ -343,36 +329,7 @@ public class VideoChannel
         bitrateController.update(null, -1);
 
         ((VideoMediaStream) getStream()).getOrCreateBandwidthEstimator()
-            .addListener(new BandwidthEstimator.Listener()
-            {
-                @Override
-                public void bandwidthEstimationChanged(long newValueBps)
-                {
-                    bitrateController.update(null, newValueBps);
-                }
-            });
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    @Override
-    protected boolean acceptDataInputStreamDatagramPacket(DatagramPacket p)
-    {
-        boolean accept = super.acceptDataInputStreamDatagramPacket(p);
-
-        if (accept)
-        {
-            // TODO: find a way to do this only in case it is actually needed
-            // (currently this means when there is another channel in the
-            // same content, with adaptive-last-n turned on), in order to not
-            // waste resources.
-            // XXX should we also count bytes received for RTCP towards the
-            // incoming bitrate?
-            incomingBitrate.update(p.getLength(), System.currentTimeMillis());
-        }
-
-        return accept;
+            .addListener(bitrateController::update);
     }
 
     /**
@@ -411,19 +368,6 @@ public class VideoChannel
     }
 
     /**
-     * Returns the current incoming bitrate in bits per second for this
-     * <tt>VideoChannel</tt> (computed as the average bitrate over the last
-     * {@link #INCOMING_BITRATE_INTERVAL_MS} milliseconds).
-     *
-     * @deprecated We should use the statistics from the media stream for this.
-     * @return the current incoming bitrate for this <tt>VideoChannel</tt>.
-     */
-    public long getIncomingBitrate()
-    {
-        return incomingBitrate.getRate(System.currentTimeMillis());
-    }
-
-    /**
      * Gets the maximum number of video RTP streams to be sent from Jitsi
      * Videobridge to the endpoint associated with this video <tt>Channel</tt>.
      *
@@ -448,7 +392,7 @@ public class VideoChannel
             || Endpoint.SELECTED_ENDPOINTS_PROPERTY_NAME.equals(propertyName)
             || Conference.ENDPOINTS_PROPERTY_NAME.equals(propertyName))
         {
-            bitrateController.update(null, -1);
+            bitrateController.update();
         }
     }
 
@@ -458,7 +402,7 @@ public class VideoChannel
     @Override
     boolean rtpTranslatorWillWrite(
         boolean data,
-        byte[] buffer, int offset, int length,
+        RawPacket pkt,
         RtpChannel source)
     {
         if (!data)
@@ -466,38 +410,34 @@ public class VideoChannel
             return true;
         }
 
-        boolean accept = bitrateController.accept(buffer, offset, length);
+        boolean accept = bitrateController.accept(pkt);
 
         if (accept && lipSyncHack != null)
         {
             lipSyncHack
-                .onRTPTranslatorWillWriteVideo(buffer, offset, length, source);
+                .onRTPTranslatorWillWriteVideo(pkt, source);
         }
 
         return accept;
     }
 
-
     /**
      * {@inheritDoc}
-     *
-     * Fires initial events over the WebRTC data channel of this
-     * <tt>VideoChannel</tt> such as the list of last-n <tt>Endpoint</tt>s whose
-     * video is sent/RTP translated by this <tt>RtpChannel</tt> to its
-     * <tt>Endpoint</tt>.
+     * <p/>
+     * Fires the initial events such as the list of last-n endpoints whose
+     * video is sent/RTP translated by this {@link RtpChannel}.
      */
     @Override
-    void sctpConnectionReady(Endpoint endpoint)
+    void endpointMessageTransportConnected()
     {
-        super.sctpConnectionReady(endpoint);
+        super.endpointMessageTransportConnected();
 
-        if (endpoint.equals(getEndpoint()))
-        {
-            sendLastNEndpointsChangeEvent(
-                bitrateController.getForwardedEndpoints(),
-                null,
-                null);
-        }
+        // Note that it is not ideal, but safe to send this event more than
+        // once (e.g. if the endpoint message transport re-connects).
+        sendLastNEndpointsChangeEvent(
+            bitrateController.getForwardedEndpoints(),
+            null,
+            null);
     }
 
     /**
@@ -537,10 +477,8 @@ public class VideoChannel
     }
 
     /**
-     * Sends a message with <tt>colibriClass</tt>
-     * <tt>LastNEndpointsChangeEvent</tt> to the <tt>Endpoint</tt> of this
-     * <tt>VideoChannel</tt> in order to notify it that the list/set of
-     * <tt>lastN</tt> has changed.
+     * Sends a message to the {@link Endpoint} of this {@link VideoChannel}
+     * in order to notify it that the list/set of {@code lastN} has changed.
      *
      * @param forwardedEndpoints the collection of forwarded endpoints.
      * @param endpointsEnteringLastN the <tt>Endpoint</tt>s which are entering
@@ -558,60 +496,33 @@ public class VideoChannel
             return;
         }
 
-        Endpoint thisEndpoint = getEndpoint();
+        AbstractEndpoint thisEndpoint = getEndpoint();
 
         if (thisEndpoint == null)
+        {
             return;
+        }
 
         // We want endpointsEnteringLastN to always to reported. Consequently,
         // we will pretend that all lastNEndpoints are entering if no explicit
         // endpointsEnteringLastN is specified.
         // XXX do we really want that?
         if (endpointsEnteringLastN == null)
-            endpointsEnteringLastN = forwardedEndpoints;
-
-        // XXX Should we just build JSON here?
-        // colibriClass
-        StringBuilder msg
-            = new StringBuilder(
-                    "{\"colibriClass\":\"LastNEndpointsChangeEvent\"");
-
         {
-            // lastNEndpoints
-            msg.append(",\"lastNEndpoints\":");
-            msg.append(getJsonString(forwardedEndpoints));
-
-            // endpointsEnteringLastN
-            msg.append(",\"endpointsEnteringLastN\":");
-            msg.append(getJsonString(endpointsEnteringLastN));
-
-            // conferenceEndpoints
-            msg.append(",\"conferenceEndpoints\":");
-            msg.append(getJsonString(conferenceEndpoints));
+            endpointsEnteringLastN = forwardedEndpoints;
         }
-        msg.append('}');
+
+        String msg = createLastNEndpointsChangeEvent(
+            forwardedEndpoints, endpointsEnteringLastN, conferenceEndpoints);
 
         try
         {
-            thisEndpoint.sendMessage(msg.toString());
+            thisEndpoint.sendMessage(msg);
         }
         catch (IOException e)
         {
             logger.error("Failed to send message on data channel.", e);
         }
-    }
-
-    private String getJsonString(Collection<String> strings)
-    {
-        JSONArray array = new JSONArray();
-        if (strings != null && !strings.isEmpty())
-        {
-            for (String s : strings)
-            {
-                array.add(s);
-            }
-        }
-        return array.toString();
     }
 
     /**
@@ -623,7 +534,7 @@ public class VideoChannel
         if (this.lastN != lastN)
         {
             this.lastN = lastN;
-            bitrateController.update(null, -1);
+            bitrateController.update();
         }
 
         touch(); // It seems this Channel is still active.
@@ -633,7 +544,7 @@ public class VideoChannel
      * {@inheritDoc}
      */
     @Override
-    void speechActivityEndpointsChanged(List<Endpoint> endpoints)
+    void speechActivityEndpointsChanged(List<AbstractEndpoint> endpoints)
     {
         bitrateController.update(endpoints, -1);
     }
@@ -657,6 +568,7 @@ public class VideoChannel
         // FIR and PLI.
         boolean supportsFir = false;
         boolean supportsPli = false;
+        boolean supportsRemb = false;
 
         // If we're not given any PTs at all, assume that we shouldn't touch
         // RED.
@@ -673,8 +585,7 @@ public class VideoChannel
             }
 
             for (RtcpFbPacketExtension rtcpFb :
-                        payloadType.getChildExtensionsOfType(
-                                RtcpFbPacketExtension.class))
+                    payloadType.getRtcpFeedbackTypeList())
             {
                 if ("ccm".equals(rtcpFb.getAttribute("type"))
                         && "fir".equals(rtcpFb.getAttribute("subtype")))
@@ -685,6 +596,10 @@ public class VideoChannel
                     && "pli".equals(rtcpFb.getAttribute("subtype")))
                 {
                     supportsPli = true;
+                }
+                else if ("goog-remb".equals(rtcpFb.getAttribute("type")))
+                {
+                    supportsRemb = true;
                 }
             }
         }
@@ -697,10 +612,11 @@ public class VideoChannel
         }
 
         MediaStream mediaStream = getStream();
-        if (mediaStream != null)
+        if (mediaStream != null && mediaStream instanceof VideoMediaStreamImpl)
         {
             ((VideoMediaStreamImpl) mediaStream).setSupportsFir(supportsFir);
             ((VideoMediaStreamImpl) mediaStream).setSupportsPli(supportsPli);
+            ((VideoMediaStreamImpl) mediaStream).setSupportsRemb(supportsRemb);
         }
     }
 
@@ -710,7 +626,8 @@ public class VideoChannel
     @Override
     protected void dominantSpeakerChanged()
     {
-        Endpoint dominantEndpoint = conferenceSpeechActivity.getDominantEndpoint();
+        AbstractEndpoint dominantEndpoint
+            = conferenceSpeechActivity.getDominantEndpoint();
 
         if (dominantEndpoint != null && dominantEndpoint.equals(getEndpoint()))
         {
@@ -769,6 +686,31 @@ public class VideoChannel
     }
 
     /**
+     * Set the maximum frame height, in pixels, of video streams that can be forwarded
+     * to this participant.
+     *
+     * @param maxFrameHeight the maximum frame height, in pixels, of video streams that can be forwarded
+     * to this participant;
+     */
+    public void setMaxFrameHeight(int maxFrameHeight)
+    {
+        this.maxFrameHeight = maxFrameHeight;
+        this.bitrateController.update();
+    }
+
+    /**
+     * Get the maximum frame height, in pixels, of video streams that can be forwarded
+     * to this participant.
+     *
+     * @return the maximum frame height, in pixels, of video streams that can be forwarded
+     * to this participant;
+     */
+    public int getMaxFrameHeight()
+    {
+        return this.maxFrameHeight;
+    }
+
+    /**
      * @return the maximum round trip time in milliseconds from other video
      * channels in this channel's content.
      */
@@ -781,7 +723,9 @@ public class VideoChannel
             {
                 long rtt = ((VideoChannel) channel).getRtt();
                 if (maxRtt < rtt)
+                {
                     maxRtt = rtt;
+                }
             }
         }
 
@@ -839,7 +783,8 @@ public class VideoChannel
                             + getStream().hashCode()
                             + ",reason=scheduled");
                     }
-                    rtcpFeedbackMessageSender.sendFIR(ssrc);
+                    rtcpFeedbackMessageSender.
+                        requestKeyframe(ssrc & 0xffff_ffffL);
                 }
             }
         };
@@ -898,17 +843,16 @@ public class VideoChannel
                 }
 
                 long sendingBitrate = 0;
-                Endpoint endpoint = getEndpoint();
+                AbstractEndpoint endpoint = getEndpoint();
                 if (endpoint != null)
                 {
-                    for (RtpChannel channel : endpoint.getChannels(null))
-                    {
-                        sendingBitrate +=
-                            channel
+                    sendingBitrate = endpoint.getChannels().stream()
+                        .mapToLong(
+                            channel -> channel
                                 .getStream()
                                 .getMediaStreamStats()
-                                .getSendStats().getBitrate();
-                    }
+                                .getSendStats().getBitrate())
+                        .sum();
                 }
 
                 if (sendingBitrate <= 0)
@@ -920,14 +864,19 @@ public class VideoChannel
                     = getStream()
                         .getMediaStreamStats().getSendStats().getLossRate();
 
-                logger.info(Logger.Category.STATISTICS,
-                           "sending_bitrate," + getLoggingId()
-                           + " bwe=" + bwe
-                           + ",sbr=" + sendingBitrate
-                           + ",loss=" + lossRate
-                           + ",remb=" + bandwidthEstimator.getLatestREMB()
-                           + ",rrLoss="
-                               + bandwidthEstimator.getLatestFractionLoss());
+                if (logger.isDebugEnabled())
+                {
+                    logger.debug(Logger.Category.STATISTICS,
+                                "sending_bitrate," + getLoggingId()
+                                    + " bwe=" + bwe
+                                    + ",sbr=" + sendingBitrate
+                                    + ",loss=" + lossRate
+                                    + ",remb=" + bandwidthEstimator
+                                    .getLatestREMB()
+                                    + ",rrLoss="
+                                    + bandwidthEstimator
+                                    .getLatestFractionLoss());
+                }
             }
         };
     }

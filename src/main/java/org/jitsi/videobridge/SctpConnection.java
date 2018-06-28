@@ -26,7 +26,6 @@ import net.java.sip.communicator.impl.protocol.jabber.extensions.jingle.*;
 
 import org.ice4j.socket.*;
 import org.ice4j.util.*;
-import org.jitsi.impl.neomedia.*;
 import org.jitsi.impl.neomedia.transform.dtls.*;
 import org.jitsi.impl.osgi.framework.*;
 import org.jitsi.sctp4j.*;
@@ -240,18 +239,17 @@ public class SctpConnection
     public SctpConnection(
             String id,
             Content content,
-            Endpoint endpoint,
+            AbstractEndpoint endpoint,
             int remoteSctpPort,
             String channelBundleId,
             Boolean initiator)
         throws Exception
     {
-        super(
-                content,
-                id,
-                channelBundleId,
-                IceUdpTransportPacketExtension.NAMESPACE,
-                initiator);
+        super(content,
+              id,
+              channelBundleId,
+              IceUdpTransportPacketExtension.NAMESPACE,
+              initiator);
 
         logger
             = Logger.getLogger(classLogger, content.getConference().getLogger());
@@ -263,7 +261,7 @@ public class SctpConnection
                 handler);
 
         this.remoteSctpPort = remoteSctpPort;
-        this.debugId = generateDebugId();
+        debugId = generateDebugId();
     }
 
     /**
@@ -500,14 +498,7 @@ public class SctpConnection
         if (!isExpired())
         {
             eventDispatcher.execute(
-                    new Runnable()
-                    {
-                        @Override
-                        public void run()
-                        {
-                            notifyChannelOpenedInEventDispatcher(dataChannel);
-                        }
-                    });
+                () -> notifyChannelOpenedInEventDispatcher(dataChannel));
         }
     }
 
@@ -523,7 +514,9 @@ public class SctpConnection
             if (ls != null)
             {
                 for (WebRtcDataStreamListener l : ls)
+                {
                     l.onChannelOpened(this, dataChannel);
+                }
             }
         }
     }
@@ -537,14 +530,7 @@ public class SctpConnection
         if (!isExpired())
         {
             eventDispatcher.execute(
-                    new Runnable()
-                    {
-                        @Override
-                        public void run()
-                        {
-                            notifySctpConnectionReadyInEventDispatcher();
-                        }
-                    });
+                this::notifySctpConnectionReadyInEventDispatcher);
         }
     }
 
@@ -715,14 +701,19 @@ public class SctpConnection
      * {@inheritDoc}
      */
     @Override
-    protected void onEndpointChanged(Endpoint oldValue, Endpoint newValue)
+    protected void onEndpointChanged(
+        AbstractEndpoint oldValue, AbstractEndpoint newValue)
     {
         super.onEndpointChanged(oldValue, newValue);
 
-        if (oldValue != null)
-            oldValue.setSctpConnection(null);
-        if (newValue != null)
-            newValue.setSctpConnection(this);
+        if (oldValue != null && oldValue instanceof Endpoint)
+        {
+            ((Endpoint) oldValue).setSctpConnection(null);
+        }
+        if (newValue != null && newValue instanceof Endpoint)
+        {
+            ((Endpoint) newValue).setSctpConnection(this);
+        }
     }
 
     /**
@@ -978,9 +969,10 @@ public class SctpConnection
     private void runOnDtlsTransport(StreamConnector connector)
         throws IOException
     {
-        DtlsControlImpl dtlsControl
-            = getTransportManager().getDtlsControl(this);
-        DtlsTransformEngine engine = dtlsControl.getTransformEngine();
+        SrtpControl srtpControl
+            = getTransportManager().getSrtpControl(this);
+        DtlsTransformEngine engine
+            = (DtlsTransformEngine) srtpControl.getTransformEngine();
         DtlsPacketTransformer transformer
             = (DtlsPacketTransformer) engine.getRTPTransformer();
         if (this.transformer == null)
