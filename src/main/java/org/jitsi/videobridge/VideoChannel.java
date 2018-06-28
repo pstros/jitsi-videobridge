@@ -326,6 +326,7 @@ public class VideoChannel
         throws IOException
     {
         super.initialize(rtpLevelRelayType);
+        bitrateController.update(null, -1);
 
         ((VideoMediaStream) getStream()).getOrCreateBandwidthEstimator()
             .addListener(bitrateController::update);
