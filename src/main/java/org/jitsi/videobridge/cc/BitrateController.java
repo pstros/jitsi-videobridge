@@ -545,6 +545,23 @@ public class BitrateController
                 synchronized (ssrcToSimulcastController)
                 {
                     ctrl = ssrcToSimulcastController.get(ssrc & 0xFFFF_FFFFL);
+
+                    if (ctrl != null)
+                    {
+                        if (trackBitrateAllocation.track != ctrl.getSource()) 
+                        {
+                            ssrcToSimulcastController.remove(ssrc & 0xFFFF_FFFFL);
+                            try {
+                              ctrl.close();
+                            }
+                            catch (Exception ignored)
+                            {
+            
+                            }
+                            ctrl = ssrcToSimulcastController.get(ssrc & 0xFFFF_FFFFL);
+                        }
+                    }
+
                     if (ctrl == null && trackBitrateAllocation.track != null)
                     {
                         RTPEncodingDesc[] rtpEncodings
