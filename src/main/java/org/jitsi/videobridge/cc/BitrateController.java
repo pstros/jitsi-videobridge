@@ -540,8 +540,54 @@ public class BitrateController
                     trackIdealIdx = trackBitrateAllocation.getIdealIndex();
 
                 // Review this.
-                AdaptiveTrackProjection adaptiveTrackProjection
-                    = lookupOrCreateAdaptiveTrackProjection(trackBitrateAllocation);
+                SimulcastController ctrl;
+                synchronized (ssrcToSimulcastController)
+                {
+                    ctrl = ssrcToSimulcastController.get(ssrc & 0xFFFF_FFFFL);
+
+                    if (ctrl != null)
+                    {
+                        if (trackBitrateAllocation.track != ctrl.getSource())
+                        {
+                            ssrcToSimulcastController.remove(ssrc & 0xFFFF_FFFFL);
+                            try {
+                              ctrl.close();
+                            }
+                            catch (Exception ignored)
+                            {
+
+                            }
+                            ctrl = ssrcToSimulcastController.get(ssrc & 0xFFFF_FFFFL);
+                        }
+                    }
+
+                    if (ctrl == null && trackBitrateAllocation.track != null)
+                    {
+                        RTPEncodingDesc[] rtpEncodings
+                            = trackBitrateAllocation.track.getRTPEncodings();
+
+                        if (!ArrayUtils.isNullOrEmpty(rtpEncodings))
+                        {
+                            ctrl = new SimulcastController(
+                                this, trackBitrateAllocation.track);
+
+                            // Route all encodings to the specified bitrate
+                            // controller.
+                            for (RTPEncodingDesc rtpEncoding : rtpEncodings)
+                            {
+                                ssrcToSimulcastController.put(
+                                    rtpEncoding.getPrimarySSRC(), ctrl);
+
+                                long rtxSsrc = rtpEncoding.getSecondarySsrc(Constants.RTX);
+                                if (rtxSsrc != -1)
+                                {
+                                    ssrcToSimulcastController.put(
+                                        rtxSsrc, ctrl);
+                                }
+                            }
+                        }
+                    }
+                }
 
                 if (adaptiveTrackProjection != null)
                 {
