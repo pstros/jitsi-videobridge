@@ -545,6 +545,7 @@ public class BitrateController
                 {
                     ctrl = ssrcToSimulcastController.get(ssrc & 0xFFFF_FFFFL);
 
+                    // Mediastream track has been updated so a new simulcast controller is required.
                     if (ctrl != null && trackBitrateAllocation.track != ctrl.getSource())
                     {
                         if (trackBitrateAllocation.track != ctrl.getSource())
