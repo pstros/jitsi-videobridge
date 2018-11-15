@@ -546,20 +546,17 @@ public class BitrateController
                 {
                     ctrl = ssrcToSimulcastController.get(ssrc & 0xFFFF_FFFFL);
 
-                    if (ctrl != null)
+                    if (ctrl != null && trackBitrateAllocation.track != ctrl.getSource()) 
                     {
-                        if (trackBitrateAllocation.track != ctrl.getSource()) 
-                        {
-                            ssrcToSimulcastController.remove(ssrc & 0xFFFF_FFFFL);
-                            try {
-                              ctrl.close();
-                            }
-                            catch (Exception ignored)
-                            {
+                       ssrcToSimulcastController.remove(ssrc & 0xFFFF_FFFFL);
+                       try {
+                         ctrl.close();
+                       }
+                       catch (Exception ignored)
+                       {
             
-                            }
-                            ctrl = ssrcToSimulcastController.get(ssrc & 0xFFFF_FFFFL);
-                        }
+                       }
+                       ctrl = null
                     }
 
                     if (ctrl == null && trackBitrateAllocation.track != null)
