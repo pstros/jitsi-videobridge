@@ -545,6 +545,21 @@ public class BitrateController
                 synchronized (ssrcToSimulcastController)
                 {
                     ctrl = ssrcToSimulcastController.get(ssrc & 0xFFFF_FFFFL);
+
+                    // Mediastream track has been updated so a new simulcast controller is required.
+                    if (ctrl != null && trackBitrateAllocation.track != ctrl.getSource()) 
+                    {
+                       ssrcToSimulcastController.remove(ssrc & 0xFFFF_FFFFL);
+                       try {
+                         ctrl.close();
+                       }
+                       catch (Exception ignored)
+                       {
+            
+                       }
+                       ctrl = null;
+                    }
+
                     if (ctrl == null && trackBitrateAllocation.track != null)
                     {
                         RTPEncodingDesc[] rtpEncodings
