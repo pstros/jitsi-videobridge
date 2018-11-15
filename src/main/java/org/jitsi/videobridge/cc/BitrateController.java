@@ -557,7 +557,7 @@ public class BitrateController
                        {
             
                        }
-                       ctrl = null
+                       ctrl = null;
                     }
 
                     if (ctrl == null && trackBitrateAllocation.track != null)
