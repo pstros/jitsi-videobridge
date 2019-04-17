@@ -38,6 +38,7 @@ import org.jitsi.service.configuration.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.util.*;
 import org.jitsi.util.Logger;
+import org.jitsi.videobridge.health.*;
 import org.jitsi.videobridge.rest.*;
 import org.osgi.framework.*;
 
@@ -183,6 +184,22 @@ public class IceUdpTransportManager
     private static int tcpHarvesterMappedPort = -1;
 
     /**
+     * Whether the "component socket" feature of ice4j should be used. If this
+     * feature is used, ice4j will create a separate merging socket instance
+     * for each component, which reads from the sockets of all successful
+     * candidate pairs. Otherwise, this merging socket instance is not created,
+     * and the sockets from the individual candidate pairs should be used
+     * directly.
+     */
+    private static boolean useComponentSocket = true;
+
+    /**
+     * The name of the property which configures {@link #useComponentSocket}.
+     */
+    public static final String USE_COMPONENT_SOCKET_PNAME
+        = "org.jitsi.videobridge.USE_COMPONENT_SOCKET";
+
+    /**
      * Initializes the static <tt>Harvester</tt> instances used by all
      * <tt>IceUdpTransportManager</tt> instances, that is
      * {@link #tcpHarvester} and {@link #singlePortHarvesters}.
@@ -200,6 +217,10 @@ public class IceUdpTransportManager
                 return;
             }
             staticConfigurationInitialized = true;
+
+            useComponentSocket
+                = cfg.getBoolean(USE_COMPONENT_SOCKET_PNAME, useComponentSocket);
+            classLogger.info("Using component socket: " + useComponentSocket);
 
             iceUfragPrefix = cfg.getString(ICE_UFRAG_PREFIX_PNAME, null);
 
@@ -295,6 +316,42 @@ public class IceUdpTransportManager
                     tcpHarvester.addMappedPort(mappedPort);
                 }
             }
+        }
+    }
+
+    /**
+     * Stops the static <tt>Harvester</tt> instances used by all
+     * <tt>IceUdpTransportManager</tt> instances, that is
+     * {@link #tcpHarvester} and {@link #singlePortHarvesters}.
+     *
+     * @param cfg the {@link ConfigurationService} which provides values to
+     * configurable properties of the behavior/logic of the method
+     * implementation
+     */
+    public static void closeStaticConfiguration(ConfigurationService cfg)
+    {
+        synchronized (IceUdpTransportManager.class)
+        {
+            if (!staticConfigurationInitialized)
+            {
+                return;
+            }
+            staticConfigurationInitialized = false;
+
+            if (singlePortHarvesters != null)
+            {
+                singlePortHarvesters.forEach(AbstractUdpListener::close);
+                singlePortHarvesters = null;
+            }
+
+            if (tcpHarvester != null)
+            {
+                tcpHarvester.close();
+                tcpHarvester = null;
+            }
+
+            // Reset the flag to initial state.
+            healthy = true;
         }
     }
 
@@ -720,7 +777,7 @@ public class IceUdpTransportManager
             = ServiceUtils.getService(
                     getBundleContext(),
                     ConfigurationService.class);
-        boolean enableDynamicHostHarvester = true;
+        boolean disableDynamicHostHarvester = false;
 
         if (rtcpmux)
         {
@@ -743,13 +800,17 @@ public class IceUdpTransportManager
                 for (CandidateHarvester harvester : singlePortHarvesters)
                 {
                     iceAgent.addCandidateHarvester(harvester);
-                    enableDynamicHostHarvester = false;
+                    disableDynamicHostHarvester = true;
                 }
             }
         }
 
-        // Use dynamic ports iff we're not using "single port".
-        iceAgent.setUseHostHarvester(enableDynamicHostHarvester);
+        // Disable dynamic ports (UDP) if we're using "single port" (UPD), as
+        // there's no need for a client to try a similar UDP candidate twice.
+        if (disableDynamicHostHarvester)
+        {
+            iceAgent.setUseHostHarvester(false);
+        }
     }
 
     /**
@@ -1020,14 +1081,16 @@ public class IceUdpTransportManager
         iceAgent.createComponent(
                 iceStream, Transport.UDP,
                 portBase, portBase, portBase + 100,
-                keepAliveStrategy);
+                keepAliveStrategy,
+                useComponentSocket);
 
         if (numComponents > 1)
         {
             iceAgent.createComponent(
                     iceStream, Transport.UDP,
                     portBase + 1, portBase + 1, portBase + 101,
-                    keepAliveStrategy);
+                    keepAliveStrategy,
+                    useComponentSocket);
         }
 
         // Attempt to minimize subsequent bind retries: see if we have allocated
@@ -1495,13 +1558,14 @@ public class IceUdpTransportManager
             return null;
         }
 
-        MultiplexingDatagramSocket rtpSocket
-            =  iceStream.getComponent(Component.RTP).getSocket();
+        IceSocketWrapper rtpSocket
+            = getSocketForComponent(iceStream.getComponent(Component.RTP));
 
-        MultiplexingDatagramSocket rtcpSocket;
+        IceSocketWrapper rtcpSocket;
         if (numComponents > 1 && !rtcpmux)
         {
-            rtcpSocket = iceStream.getComponent(Component.RTCP).getSocket();
+            rtcpSocket
+                = getSocketForComponent(iceStream.getComponent(Component.RTCP));
         }
         else
         {
@@ -1516,16 +1580,44 @@ public class IceUdpTransportManager
 
         if (channel instanceof SctpConnection)
         {
-            try
+            DatagramSocket udpSocket = rtpSocket.getUDPSocket();
+            Socket tcpSocket = rtpSocket.getTCPSocket();
+            if (udpSocket instanceof MultiplexingDatagramSocket)
             {
-                DatagramSocket dtlsSocket
-                    = rtpSocket.getSocket(new DTLSDatagramFilter());
+                MultiplexingDatagramSocket multiplexing
+                    = (MultiplexingDatagramSocket) udpSocket;
+                try
+                {
+                    DatagramSocket dtlsSocket
+                        = multiplexing.getSocket(new DTLSDatagramFilter());
 
-                return new DefaultStreamConnector(dtlsSocket, null);
+                    return new DefaultStreamConnector(dtlsSocket, null);
+                }
+                catch (SocketException se)
+                {
+                    logger.warn("Failed to create DTLS socket: " + se);
+                }
             }
-            catch (SocketException se)
+            else if (tcpSocket instanceof MultiplexingSocket)
             {
-                        logger.warn("Failed to create DTLS socket: " + se);
+                MultiplexingSocket multiplexing
+                    = (MultiplexingSocket) tcpSocket;
+                try
+                {
+                    Socket dtlsSocket
+                        = multiplexing.getSocket(new DTLSDatagramFilter());
+
+                    return new DefaultTCPStreamConnector(dtlsSocket, null);
+                }
+                catch(IOException ioe)
+                {
+                    logger.warn("Failed to create DTLS socket: " + ioe);
+                }
+            }
+            else
+            {
+                logger.warn("No valid sockets from ice4j.");
+                return null;
             }
         }
 
@@ -1535,26 +1627,138 @@ public class IceUdpTransportManager
         }
 
         RtpChannel rtpChannel = (RtpChannel) channel;
-        DatagramSocket channelRtpSocket, channelRtcpSocket;
-        try
+        DatagramSocket rtpUdpSocket = rtpSocket.getUDPSocket();
+        DatagramSocket rtcpUdpSocket = rtcpSocket.getUDPSocket();
+        if (rtpUdpSocket instanceof MultiplexingDatagramSocket
+            && rtcpUdpSocket instanceof MultiplexingDatagramSocket)
         {
-            channelRtpSocket
-                = rtpSocket.getSocket(
-                    rtpChannel.getDatagramFilter(false /* RTP */));
-            channelRtcpSocket
-                = rtcpSocket.getSocket(
-                    rtpChannel.getDatagramFilter(true /* RTCP */));
-        }
-        catch (SocketException se)
-        {
-            throw new RuntimeException(
-                "Failed to create filtered sockets.", se);
+            return getUDPStreamConnector(
+                rtpChannel,
+                (MultiplexingDatagramSocket) rtpUdpSocket,
+                (MultiplexingDatagramSocket) rtcpUdpSocket);
         }
 
-        return new DefaultStreamConnector(
-            channelRtpSocket,
-            channelRtcpSocket,
-            rtcpmux);
+        Socket rtpTcpSocket = rtpSocket.getTCPSocket();
+        Socket rtcpTcpSocket = rtcpSocket.getTCPSocket();
+        if (rtpTcpSocket instanceof MultiplexingSocket
+            && rtcpTcpSocket instanceof MultiplexingSocket)
+        {
+            return getTCPStreamConnector(
+                rtpChannel,
+                (MultiplexingSocket) rtpTcpSocket,
+                (MultiplexingSocket) rtcpTcpSocket);
+        }
+
+        logger.warn("No valid sockets from ice4j");
+        return null;
+    }
+
+    /**
+     * Creates and returns a UDP <tt>StreamConnector</tt> to be used by a
+     * specific <tt>RtpChannel</tt>, using a specific set of
+     * {@link MultiplexingDatagramSocket} from which to read. The provided
+     * sockets are not used directly, but using a filter for the specified
+     * channel (so that they can be shared for example by an audio channel and
+     * a video channel).
+     *
+     * @param rtpChannel the <tt>RtpChannel</tt> which is to use the created
+     * <tt>StreamConnector</tt>.
+     * @param rtpSocket the socket from which to read RTP
+     * @param rtcpSocket the socket from which to read RTCP.
+     * @return a UDP <tt>StreamConnector</tt>.
+     */
+    private StreamConnector getUDPStreamConnector(
+        RtpChannel rtpChannel,
+        MultiplexingDatagramSocket rtpSocket,
+        MultiplexingDatagramSocket rtcpSocket)
+    {
+        Objects.requireNonNull(rtpSocket, "rtpSocket");
+        Objects.requireNonNull(rtcpSocket, "rtcpSocket");
+
+        try
+        {
+            MultiplexedDatagramSocket channelRtpSocket
+                = rtpSocket.getSocket(
+                    rtpChannel.getDatagramFilter(false /* RTP */));
+            MultiplexedDatagramSocket channelRtcpSocket
+                = rtcpSocket.getSocket(
+                    rtpChannel.getDatagramFilter(true /* RTCP */));
+
+            return new DefaultStreamConnector(
+                channelRtpSocket,
+                channelRtcpSocket,
+                rtcpmux);
+        }
+        catch (SocketException se) // never thrown
+        {
+            logger.error("An unexpected exception occurred.", se );
+            return null;
+        }
+    }
+
+    /**
+     * Creates and returns a TCP <tt>StreamConnector</tt> to be used by a
+     * specific <tt>RtpChannel</tt>, using a specific pair of
+     * {@link MultiplexingSocket} from which to read. The provided sockets are
+     * not used directly, but using a filter for the specified channel (so that
+     * they can be shared for example by an audio channel and a video channel).
+     *
+     * @param rtpChannel the <tt>RtpChannel</tt> which is to use the created
+     * <tt>StreamConnector</tt>.
+     * @param rtpSocket the socket from which to read RTP
+     * @param rtcpSocket the socket from which to read RTCP.
+     * @return a UDP <tt>StreamConnector</tt>.
+     */
+    private StreamConnector getTCPStreamConnector(
+        RtpChannel rtpChannel,
+        MultiplexingSocket rtpSocket,
+        MultiplexingSocket rtcpSocket)
+    {
+        Objects.requireNonNull(rtpSocket, "rtpSocket");
+        Objects.requireNonNull(rtcpSocket, "rtcpSocket");
+
+        try
+        {
+            MultiplexedSocket channelRtpSocket
+                = rtpSocket.getSocket(
+                rtpChannel.getDatagramFilter(false /* RTP */));
+            MultiplexedSocket channelRtcpSocket
+                = rtcpSocket.getSocket(
+                rtpChannel.getDatagramFilter(true /* RTCP */));
+
+            return new DefaultTCPStreamConnector(
+                channelRtpSocket,
+                channelRtcpSocket,
+                rtcpmux);
+        }
+        catch (SocketException se) // never thrown
+        {
+            logger.error("An unexpected exception occurred.", se );
+            return null;
+        }
+    }
+
+    /**
+     * Extracts the {@link IceSocketWrapper} for a specific {@link Component}.
+     * The way this is implemented depends on whether the component socket is
+     * configured or not.
+     * @param component the {@link Component} to get a socket from.
+     * @return the socket.
+     */
+    private IceSocketWrapper getSocketForComponent(Component component)
+    {
+        if (useComponentSocket)
+        {
+            return component.getSocketWrapper();
+        }
+        else
+        {
+            CandidatePair selectedPair = component.getSelectedPair();
+
+            return
+                (selectedPair == null) ? null : selectedPair
+                    .getIceSocketWrapper();
+        }
     }
 
     private MediaStreamTarget getStreamTarget()
@@ -1755,6 +1959,16 @@ public class IceUdpTransportManager
         getChannels().forEach(Channel::transportConnected);
     }
 
+    /**
+     * The name of the property which controls whether health checks failures
+     * should be permanent. If this is set to true and the bridge fails its
+     * health check once, it will not go back to the healthy state.
+     */
+    private static final String PERMANENT_FAILURE_PNAME
+        = Health.class.getName() + ".PERMANENT_FAILURE";
+
+    private static BundleContext bundleContext = null;
+    private static boolean permanentFailureMode = false;
     /**
      * @return the {@link Transport} (e.g. UDP or TCP) of the selected pair
      * of this {@link IceUdpTransportManager}. If the transport manager is

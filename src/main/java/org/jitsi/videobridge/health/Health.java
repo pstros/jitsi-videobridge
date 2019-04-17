@@ -15,15 +15,13 @@
  */
 package org.jitsi.videobridge.health;
 
-import java.io.*;
 import java.util.*;
 
-import javax.servlet.*;
-import javax.servlet.http.*;
-
-import org.eclipse.jetty.server.*;
 import org.ice4j.ice.harvest.*;
+import org.jitsi.service.configuration.*;
 import org.jitsi.service.neomedia.*;
+import org.jitsi.util.Logger;
+import org.jitsi.util.concurrent.*;
 import org.jitsi.videobridge.*;
 import org.jitsi.videobridge.xmpp.*;
 
@@ -36,7 +34,14 @@ import net.java.sip.communicator.impl.protocol.jabber.extensions.jingle.*;
  * @author Lyubomir Marinov
  */
 public class Health
+    extends PeriodicRunnableWithObject<Videobridge>
 {
+    /**
+     * The {@link Logger} used by the {@link Health} class and its
+     * instances to print debug information.
+     */
+    private static final Logger logger = Logger.getLogger(Health.class);
+
     /**
      * The {@link MediaType}s of {@link RtpChannel}s supported by
      * {@link Videobridge}. For example, {@link MediaType#DATA} is not supported
@@ -51,6 +56,54 @@ public class Health
      * {@link Videobridge} such as {@link Endpoint} IDs.
      */
     private static Random RANDOM = Videobridge.RANDOM;
+
+    /**
+     * The executor used to perform periodic health checks.
+     */
+    private static final RecurringRunnableExecutor executor
+        = new RecurringRunnableExecutor(Health.class.getName());
+
+    /**
+     * The default interval between health checks.
+     */
+    private static final int PERIOD_DEFAULT = 10000;
+
+    /**
+     * The name of the property which configures the interval between health
+     * checks.
+     */
+    public static final String PERIOD_PNAME
+        = "org.jitsi.videobridge.health.INTERVAL";
+
+    /**
+     * The default timeout for health checks.
+     */
+    private static final int TIMEOUT_DEFAULT = 30000;
+
+    /**
+     * The name of the property which configures the timeout for health checks.
+     * The {@link #check()} API will return failure unless a there was a health
+     * check performed in the last that many milliseconds.
+     */
+    public static final String TIMEOUT_PNAME
+        = "org.jitsi.videobridge.health.TIMEOUT";
+
+    /**
+     * The name of the property which makes any failures sticky (i.e. once the
+     * bridge becomes unhealthy it will never go back to a healthy state).
+     */
+    public static final String STICKY_FAILURES_PNAME
+        = "org.jitsi.videobridge.health.STICKY_FAILURES";
+
+    /**
+     * The default value for the {@code STICKY_FAILURES} property.
+     */
+    private static final boolean STICKY_FAILURES_DEFAULT = false;
+
+    /**
+     * Failures in the first 5 minutes are never sticky.
+     */
+    private static final long STICKY_FAILURES_GRACE_PERIOD = 300_000;
 
     /**
      * Checks the health (status) of the {@link Videobridge} associated with a
@@ -78,14 +131,16 @@ public class Health
 
             // Fail as quickly as possible.
             if (endpoint == null)
+            {
                 throw new NullPointerException("Failed to create an endpoint.");
+            }
 
             endpoints[i] = endpoint;
 
             String channelBundleId = null;
             // Since Endpoints will connect between themselves, they should be
             // opposite in initiator terms.
-            Boolean initiator = Boolean.valueOf(i % 2 == 0);
+            Boolean initiator = i % 2 == 0;
 
             for (MediaType mediaType : MEDIA_TYPES)
             {
@@ -117,8 +172,10 @@ public class Health
 
                 // Fail as quickly as possible.
                 if (rtpChannel == null)
+                {
                     throw new NullPointerException(
-                            "Failed to create a channel.");
+                        "Failed to create a channel.");
+                }
             }
 
             // SctpConnection
@@ -144,7 +201,7 @@ public class Health
     }
 
     /**
-     * Checks the health (status) of a specific {@link Videobridge}.
+     * Performs a health check on a specific {@link Videobridge}.
      *
      * @param videobridge the {@code Videobridge} to check the health (status)
      * of
@@ -152,7 +209,7 @@ public class Health
      * of {@code videobridge} or the check determines that {@code videobridge}
      * is not healthy 
      */
-    public static void check(Videobridge videobridge)
+    private static void doCheck(Videobridge videobridge)
         throws Exception
     {
         if (MappingCandidateHarvesters.stunDiscoveryFailed)
@@ -164,6 +221,8 @@ public class Health
         {
             throw new Exception("Failed to bind single-port");
         }
+
+        checkXmppConnection(videobridge);
 
         // Conference
         Conference conference
@@ -192,30 +251,32 @@ public class Health
     }
 
     /**
-     * Checks if given {@link Videobridge} has valid connection to XMPP server.
+     * Checks if this {@link Videobridge} has an XMPP component and its
+     * connection is alive. Throws an exception if this isn't the case.
+     * an XMPP component,
      *
      * @param videobridge the {@code Videobridge} to check the XMPP connection
      *                    status of
-     * @return <tt>true</tt> if given videobridge has valid XMPP connection,
-     *         also if it's not using XMPP api at all(does not have
-     *         ComponentImpl). Otherwise <tt>false</tt> will be returned.
      */
-    private static boolean checkXmppConnection(Videobridge videobridge)
+    private static void checkXmppConnection(Videobridge videobridge)
+        throws Exception
     {
         // If XMPP API was requested, but there isn't any XMPP component
-        // registered we shall return false(no valid XMPP connection)
+        // registered we shall return false (no valid XMPP connection)
         Collection<ComponentImpl> components = videobridge.getComponents();
         if (videobridge.isXmppApiEnabled() && components.size() == 0)
         {
-            return false;
+            throw new Exception("No XMPP components");
         }
 
-        for(ComponentImpl component : components)
+        for (ComponentImpl component : components)
         {
-            if(!component.isConnectionAlive())
-                return false;
+            if (!component.isConnectionAlive())
+            {
+                throw new Exception(
+                    "XMPP component not connected: " + component);
+            }
         }
-        return true;
     }
 
     /**
@@ -258,13 +319,17 @@ public class Health
 
         // Fail as quickly as possible.
         if (aSctpConnection == null)
+        {
             throw new NullPointerException("aSctpConnection is null");
+        }
 
         SctpConnection bSctpConnection = b.getSctpConnection();
 
         // Fail as quickly as possible.
         if (bSctpConnection == null)
+        {
             throw new NullPointerException("bSctpConnection is null");
+        }
 
         connect(aSctpConnection, bSctpConnection);
     }
@@ -283,13 +348,17 @@ public class Health
 
         // Fail as quickly as possible.
         if (aTransport == null)
+        {
             throw new NullPointerException("Failed to describe transport.");
+        }
 
         IceUdpTransportPacketExtension bTransport = describeTransportManager(b);
 
         // Fail as quickly as possible.
         if (bTransport == null)
+        {
             throw new NullPointerException("Failed to describe transport.");
+        }
 
         b.setTransport(aTransport);
         a.setTransport(bTransport);
@@ -329,66 +398,6 @@ public class Health
     }
 
     /**
-     * Gets a JSON representation of the health (status) of a specific
-     * {@link Videobridge}.
-     *
-     * @param videobridge the {@code Videobridge} to get the health (status) of
-     * in the form of a JSON representation
-     * @param baseRequest the original unwrapped {@link Request} object
-     * @param request the request either as the {@code Request} object or a
-     * wrapper of that request
-     * @param response the response either as the {@code Response} object or a
-     * wrapper of that response
-     * @throws IOException
-     * @throws ServletException
-     */
-    public static void getJSON(
-        Videobridge videobridge,
-        Request baseRequest,
-        HttpServletRequest request,
-        HttpServletResponse response)
-        throws IOException,
-               ServletException
-    {
-        int status;
-        String reason = null;
-
-        try
-        {
-            // Check XMPP connection status first
-            if (checkXmppConnection(videobridge))
-            {
-                // Check if the videobridge is functional
-                check(videobridge);
-                status = HttpServletResponse.SC_OK;
-            }
-            else
-            {
-                status = HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
-                reason = "XMPP component connection failure.";
-            }
-        }
-        catch (Exception ex)
-        {
-            if (ex instanceof IOException)
-                throw (IOException) ex;
-            else if (ex instanceof ServletException)
-                throw (ServletException) ex;
-            else
-            {
-                status = HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
-                reason = ex.getMessage();
-            }
-        }
-
-        if (reason != null)
-        {
-            response.getOutputStream().println(reason);
-        }
-        response.setStatus(status);
-    }
-
-    /**
      * Connects a specific list of {@link Endpoint}s between themselves (in
      * consecutive pairs).
      *
@@ -400,6 +409,157 @@ public class Health
         throws Exception
     {
         for (int i = 0; i < endpoints.length;)
+        {
             connect(endpoints[i++], endpoints[i++]);
+        }
     }
+
+    /**
+     * The exception resulting from the last health check performed on this
+     * videobridge. When the health check is successful, this is
+     * {@code null}.
+     */
+    private Exception lastResult = null;
+
+    /**
+     * The time the last health check finished being performed. A value of
+     * {@code -1} indicates that no health check has been performed yet.
+     */
+    private long lastResultMs = -1;
+
+    /**
+     * The timeout in milliseconds after which this videobridge will be
+     * considered unhealthy; i.e. if no health check has been completed in the
+     * last {@code timeout} milliseconds the bridge is unhealthy.
+     */
+    private final int timeout;
+
+    /**
+     * Whether failures are sticky, i.e. once the bridge becomes unhealthy it
+     * will never go back to a healthy state.
+     */
+    private final boolean stickyFailures;
+
+    /**
+     * The time when this instance was started.
+     */
+    private final long startMs;
+
+    /**
+     * Whether we've seen a health check failure.
+     */
+    private boolean hasFailed = false;
+
+    public Health(Videobridge videobridge, ConfigurationService cfg)
+    {
+        super(videobridge, PERIOD_DEFAULT, true);
+
+        int period =
+            cfg == null ? PERIOD_DEFAULT
+                : cfg.getInt(PERIOD_PNAME, PERIOD_DEFAULT);
+        setPeriod(period);
+
+        timeout =
+            cfg == null ? TIMEOUT_DEFAULT
+                : cfg.getInt(TIMEOUT_PNAME, TIMEOUT_DEFAULT);
+
+        stickyFailures
+            = cfg == null ? STICKY_FAILURES_DEFAULT
+                : cfg.getBoolean(
+                    STICKY_FAILURES_PNAME, STICKY_FAILURES_DEFAULT);
+
+        startMs = System.currentTimeMillis();
+
+        executor.registerRecurringRunnable(this);
+    }
+
+    /**
+     * Stops running health checks for this {@link Videobridge}.
+     */
+    public void stop()
+    {
+        executor.deRegisterRecurringRunnable(this);
+    }
+
+    /**
+     * Performs a health check and updates this instance's state.
+     */
+    @Override
+    protected void doRun()
+    {
+        long start = System.currentTimeMillis();
+        Exception exception = null;
+
+        try
+        {
+            Health.doCheck(this.o);
+        }
+        catch (Exception e)
+        {
+            exception = e;
+            if (System.currentTimeMillis() - this.startMs
+                > STICKY_FAILURES_GRACE_PERIOD)
+            {
+                hasFailed = true;
+            }
+        }
+
+        long duration = System.currentTimeMillis() - start;
+        lastResultMs = start + duration;
+
+        if (stickyFailures && hasFailed && exception == null)
+        {
+            // We didn't fail this last test, but we've failed before and
+            // sticky failures are enabled.
+            lastResult = new Exception("Sticky failure.");
+        }
+        else
+        {
+            lastResult = exception;
+        }
+
+        if (exception == null)
+        {
+            logger.info(
+                "Performed a successful health check in " + duration
+                    + "ms. Sticky failure: " + (stickyFailures && hasFailed));
+        }
+        else
+        {
+            logger.error(
+                "Health check failed in " + duration + "ms:", exception);
+        }
+    }
+
+    /**
+     * Checks the health of this {@link Videobridge}. This method only returns
+     * the cache results, it does not do the actual health check (i.e. creating
+     * a test conference).
+     *
+     * @throws Exception if an error occurs while checking the health (status)
+     * of {@code videobridge} or the check determines that {@code videobridge}
+     * is not healthy.
+     */
+    public void check()
+        throws Exception
+    {
+        Exception lastResult = this.lastResult;
+        long lastResultMs = this.lastResultMs;
+        long timeSinceLastResult = System.currentTimeMillis() - lastResultMs;
+
+        if (timeSinceLastResult > timeout)
+        {
+            throw new Exception(
+                "No health checks performed recently, the last result was "
+                    + timeSinceLastResult + "ms ago.");
+        }
+
+        if (lastResult != null)
+        {
+            throw new Exception(lastResult);
+        }
+
+        // We've had a recent result, and it is successful (no exception).
+    }
+
 }

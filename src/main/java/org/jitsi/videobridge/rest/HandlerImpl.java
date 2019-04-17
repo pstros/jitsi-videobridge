@@ -29,6 +29,7 @@ import org.jitsi.rest.*;
 import org.jitsi.videobridge.*;
 import org.jitsi.videobridge.health.*;
 import org.jitsi.videobridge.stats.*;
+import org.jitsi.videobridge.xmpp.*;
 import org.jivesoftware.smack.packet.*;
 import org.json.simple.*;
 import org.json.simple.parser.*;
@@ -220,6 +221,12 @@ class HandlerImpl
      * <tt>VideobridgeStatistics</tt>s of <tt>Videobridge</tt>.
      */
     private static final String STATISTICS = "stats";
+
+    /**
+     * The HTTP resource which allows control of {@link ClientConnectionImpl}
+     * (i.e. adding or removing MUC clients).
+     */
+    private static final String MUC_CLIENT = "muc-client";
 
     static
     {
@@ -466,11 +473,63 @@ class HandlerImpl
         }
         else
         {
-            Health.getJSON(videobridge, baseRequest, request, response);
+            getHealthJSON(videobridge, baseRequest, request, response);
         }
 
         endResponse(/* target */ null, baseRequest, request, response);
     }
+
+    /**
+     * Gets a JSON representation of the health (status) of a specific
+     * {@link Videobridge}.
+     *
+     * @param videobridge the {@code Videobridge} to get the health (status) of
+     * in the form of a JSON representation
+     * @param baseRequest the original unwrapped {@link Request} object
+     * @param request the request either as the {@code Request} object or a
+     * wrapper of that request
+     * @param response the response either as the {@code Response} object or a
+     * wrapper of that response
+     * @throws IOException
+     * @throws ServletException
+     */
+    public static void getHealthJSON(
+        Videobridge videobridge,
+        Request baseRequest,
+        HttpServletRequest request,
+        HttpServletResponse response)
+        throws IOException,
+               ServletException
+    {
+        int status;
+        String reason = null;
+
+        try
+        {
+            // Check if the videobridge is functional
+            videobridge.healthCheck();
+            status = HttpServletResponse.SC_OK;
+        }
+        catch (Exception ex)
+        {
+            if (ex instanceof IOException)
+                throw (IOException) ex;
+            else if (ex instanceof ServletException)
+                throw (ServletException) ex;
+            else
+            {
+                status = HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
+                reason = ex.getMessage();
+            }
+        }
+
+        if (reason != null)
+        {
+            response.getOutputStream().println(reason);
+        }
+        response.setStatus(status);
+    }
+
 
     /**
      * Gets a JSON representation of the <tt>VideobridgeStatistics</tt> of (the
@@ -938,8 +997,8 @@ class HandlerImpl
     {
         if (!colibriEnabled)
         {
-          response.setStatus(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
-          return;
+            response.setStatus(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
+            return;
         }
 
         if (target == null)
@@ -969,7 +1028,7 @@ class HandlerImpl
                 else
                 {
                     response.setStatus(
-                            HttpServletResponse.SC_METHOD_NOT_ALLOWED);
+                        HttpServletResponse.SC_METHOD_NOT_ALLOWED);
                 }
             }
             else
@@ -980,24 +1039,24 @@ class HandlerImpl
                 {
                     // Retrieve a representation of a Conference of Videobridge.
                     doGetConferenceJSON(
-                            target,
-                            baseRequest,
-                            request,
-                            response);
+                        target,
+                        baseRequest,
+                        request,
+                        response);
                 }
                 else if (PATCH_HTTP_METHOD.equals(requestMethod))
                 {
                     // Modify a Conference of Videobridge.
                     doPatchConferenceJSON(
-                            target,
-                            baseRequest,
-                            request,
-                            response);
+                        target,
+                        baseRequest,
+                        request,
+                        response);
                 }
                 else
                 {
                     response.setStatus(
-                            HttpServletResponse.SC_METHOD_NOT_ALLOWED);
+                        HttpServletResponse.SC_METHOD_NOT_ALLOWED);
                 }
             }
         }
@@ -1023,13 +1082,103 @@ class HandlerImpl
 
             if (POST_HTTP_METHOD.equals(request.getMethod()))
             {
-                // Get the VideobridgeStatistics of Videobridge.
                 doPostShutdownJSON(baseRequest, request, response);
             }
             else
             {
                 response.setStatus(HttpServletResponse.SC_METHOD_NOT_ALLOWED);
             }
+        }
+        else if (target.startsWith(MUC_CLIENT + "/"))
+        {
+            doHandleMucClientRequest(
+                target.substring((MUC_CLIENT + "/").length()),
+                request,
+                response);
+        }
+    }
+
+    /**
+     * Handles a request to /colibri/muc-client/.
+     * @param target the target URL with the part before "muc-client/" stripped.
+     * @param request the request.
+     * @param response the response being prepared.
+     */
+    private void doHandleMucClientRequest(
+        String target,
+        HttpServletRequest request,
+        HttpServletResponse response)
+    {
+        if (!POST_HTTP_METHOD.equals(request.getMethod()))
+        {
+            response.setStatus(HttpServletResponse.SC_METHOD_NOT_ALLOWED);
+            return;
+        }
+
+        if (!RESTUtil.isJSONContentType(request.getContentType()))
+        {
+            response.setStatus(HttpServletResponse.SC_UNSUPPORTED_MEDIA_TYPE);
+            return;
+        }
+
+        JSONObject requestJSONObject;
+        try
+        {
+            Object o = new JSONParser().parse(request.getReader());
+            if (o instanceof JSONObject)
+            {
+                requestJSONObject = (JSONObject) o;
+            }
+            else
+            {
+                requestJSONObject = null;
+            }
+        }
+        catch (Exception e)
+        {
+            requestJSONObject = null;
+        }
+
+        if (requestJSONObject == null)
+        {
+            response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+            return;
+        }
+
+        ClientConnectionImpl clientConnectionImpl
+            = getService(ClientConnectionImpl.class);
+        if (clientConnectionImpl == null)
+        {
+            response.setStatus(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
+            return;
+        }
+
+        if ("add".equals(target))
+        {
+            if (clientConnectionImpl.addMucClient(requestJSONObject))
+            {
+                response.setStatus(HttpServletResponse.SC_OK);
+            }
+            else
+            {
+                response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+            }
+        }
+        else if ("remove".equals(target))
+        {
+            if (clientConnectionImpl.removeMucClient(requestJSONObject))
+            {
+                response.setStatus(HttpServletResponse.SC_OK);
+            }
+            else
+            {
+                response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+            }
+        }
+        else
+        {
+            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            return;
         }
     }
 
@@ -1092,7 +1241,7 @@ class HandlerImpl
             // Initially, we had VERSION_TARGET equal to /version. But such an
             // HTTP resource could be rewritten by Meet. In order to decrease
             // the risk of rewriting, we moved the VERSION_TARGET to
-            // /about/version. For the sake of compatiblity though, we are
+            // /about/version. For the sake of compatibility though, we are
             // preserving /version.
             String versionTarget = "/version";
 

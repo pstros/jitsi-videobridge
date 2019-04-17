@@ -27,7 +27,6 @@ import org.jitsi.meet.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.service.packetlogging.*;
 import org.jitsi.stats.media.*;
-import org.jitsi.videobridge.cc.*;
 import org.jitsi.videobridge.xmpp.*;
 
 /**
@@ -80,27 +79,23 @@ public class JvbBundleConfig
             "org/jitsi/videobridge/eventadmin/callstats/Activator"
         },
         {
-            "org/jitsi/videobridge/VideobridgeBundleActivator"
-        },
-        {
             "org/jitsi/videobridge/version/VersionActivator"
         },
         {
-            // The HTTP/JSON API of Videobridge is started after and in a start
-            // level separate from Videobridge because the HTTP/JSON API is
-            // useless if Videobridge fails to start.
+            // The HTTP/JSON API of Videobridge is started before Videobridge
+            // because Jetty needs to bind to its port before the ice4j
+            // TCP harvester (started as part of Videobridge) does.
             "org/jitsi/videobridge/rest/RESTBundleActivator",
             "org/jitsi/videobridge/rest/PublicRESTBundleActivator",
-            // The statistics/health reports are a non-vital, optional,
-            // additional piece of functionality of the Videobridge.
-            // Consequently, they do not have to be started before the
-            // Videobridge. Besides, they employ OSGi and, hence, they should be
-            // capable of acting as a plug-in. They do not have to be started
-            // before the HTTP/JSON API because the HTTP/JSON API (1) exposes
-            // the vital, non-optional, non-additional pieces of functionality
-            // of the Videobridge and (2) it pulls, does not push.
+            "org/jitsi/videobridge/rest/PublicClearPortRedirectBundleActivator",
             "org/jitsi/videobridge/stats/StatsManagerBundleActivator",
             "org/jitsi/videobridge/EndpointConnectionStatus"
+        },
+        {
+            "org/jitsi/videobridge/VideobridgeBundleActivator"
+        },
+        {
+            "org/jitsi/videobridge/xmpp/ClientConnectionImpl"
         },
         {
             "org/jitsi/videobridge/octo/OctoRelayService"
@@ -172,15 +167,6 @@ public class JvbBundleConfig
 
         // Configure the starting send bitrate to be 2.5Mbps.
         defaults.put(BandwidthEstimatorImpl.START_BITRATE_BPS_PNAME, "2500000");
-
-        // Enable picture ID rewriting by default, as jumping picture IDs cause
-        // recent versions of Chrome to crash.
-        defaults.put(
-            SimulcastController.ENABLE_VP8_PICID_REWRITING_PNAME, true_);
-
-        // Trust the send side bandwidth estimations (which enables adaptivity)
-        // by default.
-        defaults.put(BitrateController.TRUST_BWE_PNAME, true_);
 
         // Enable VP8 temporal scalability filtering by default.
         defaults.put(MediaStreamTrackFactory.ENABLE_SVC_PNAME, true_);

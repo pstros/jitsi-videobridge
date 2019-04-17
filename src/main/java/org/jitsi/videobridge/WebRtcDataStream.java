@@ -34,6 +34,11 @@ public class WebRtcDataStream
         = Logger.getLogger(WebRtcDataStream.class);
 
     /**
+     * The parent {@link SctpConnection} instance.
+     */
+    private final SctpConnection sctpConnection;
+
+    /**
      * <tt>SctpSocket</tt> used for sending SCTP data.
      */
     private final SctpSocket socket;
@@ -61,15 +66,18 @@ public class WebRtcDataStream
     /**
      * Initializes new instance of <tt>WebRtcDataStream</tt> with specified
      * parameters.
+     * @param connection the parent {@link SctpConnection} instance.
      * @param socket the SCTP socket used for transport.
      * @param sid SCTP stream id to be used by this channel.
      * @param label name of the channel.
      * @param acknowledged indicates if this channel has been already
      *                     acknowledged by remote peer.
      */
-    WebRtcDataStream(SctpSocket socket, int sid, String label,
+    WebRtcDataStream(SctpConnection connection,
+                     SctpSocket socket, int sid, String label,
                      boolean acknowledged)
     {
+        this.sctpConnection = connection;
         this.socket = socket;
         this.sid = sid;
         this.label = label;
@@ -83,6 +91,15 @@ public class WebRtcDataStream
     public String getLabel()
     {
         return label;
+    }
+
+    /**
+     * Returns the parent {@link SctpConnection} which owns this instance.
+     * @return {@link SctpConnection}
+     */
+    public SctpConnection getSctpConnection()
+    {
+        return sctpConnection;
     }
 
     /**
@@ -119,7 +136,19 @@ public class WebRtcDataStream
     public void onStringMsg(String stringMsg)
     {
         if(dataCallback != null)
+        {
             dataCallback.onStringData(this, stringMsg);
+        }
+        else
+        {
+            // NOTE consider adding analytics for the missed out data to detect
+            // bugs ?
+            logger.error(
+                String.format(
+                    "Unprocessed data on %s (SID=%d) - no callback registered",
+                    sctpConnection.getLoggingId(),
+                    sid));
+        }
     }
 
     /**
@@ -160,7 +189,19 @@ public class WebRtcDataStream
     public void onBinaryMsg(byte[] binMsg)
     {
         if(dataCallback != null)
+        {
             dataCallback.onBinaryData(this, binMsg);
+        }
+        else
+        {
+            // NOTE consider adding analytics for the missed out data to detect
+            // bugs ?
+            logger.error(
+                String.format(
+                    "Unprocessed data on %s (SID=%d) - no callback registered",
+                    sctpConnection.getLoggingId(),
+                    sid));
+        }
     }
 
     /**

@@ -206,6 +206,27 @@ public class VideobridgeStatistics
         = "total_conference_seconds";
 
     /**
+     * The name of the stat indicating the total number of participant-seconds
+     * that are loss-controlled (i.e. the sum of the lengths is seconds).
+     */
+    private static final String TOTAL_LOSS_CONTROLLED_PARTICIPANT_SECONDS
+        = "total_loss_controlled_participant_seconds";
+
+    /**
+     * The name of the stat indicating the total number of participant-seconds
+     * that are loss-limited.
+     */
+    private static final String TOTAL_LOSS_LIMITED_PARTICIPANT_SECONDS
+        = "total_loss_limited_participant_seconds";
+
+    /**
+     * The name of the stat indicating the total number of participant-seconds
+     * that are loss-degraded.
+     */
+    private static final String TOTAL_LOSS_DEGRADED_PARTICIPANT_SECONDS
+        = "total_loss_degraded_participant_seconds";
+
+    /**
      * The name of the stat indicating the total number of media connections
      * established over UDP.
      */
@@ -244,6 +265,54 @@ public class VideobridgeStatistics
      */
     private static final String TOTAL_COLIBRI_WEB_SOCKET_MESSAGES_SENT
         = "total_colibri_web_socket_messages_sent";
+
+    /**
+     * The name of the stat indicating the total number of bytes received in
+     * RTP packets.
+     */
+    private static final String TOTAL_BYTES_RECEIVED = "total_bytes_received";
+
+    /**
+     * The name of the stat indicating the total number of bytes sent in RTP
+     * packets.
+     */
+    private static final String TOTAL_BYTES_SENT = "total_bytes_sent";
+
+    /**
+     * The name of the stat indicating the total number of RTP packets received.
+     */
+    private static final String TOTAL_PACKETS_RECEIVED
+        = "total_packets_received";
+
+    /**
+     * The name of the stat indicating the total number of RTP packets sent.
+     */
+    private static final String TOTAL_PACKETS_SENT = "total_packets_sent";
+
+    /**
+     * The name of the stat indicating the total number of bytes received in
+     * Octo packets.
+     */
+    private static final String TOTAL_BYTES_RECEIVED_OCTO
+        = "total_bytes_received_octo";
+
+    /**
+     * The name of the stat indicating the total number of bytes sent in Octo
+     * packets.
+     */
+    private static final String TOTAL_BYTES_SENT_OCTO = "total_bytes_sent_octo";
+
+    /**
+     * The name of the stat indicating the total number of Octo packets received.
+     */
+    private static final String TOTAL_PACKETS_RECEIVED_OCTO
+        = "total_packets_received_octo";
+
+    /**
+     * The name of the stat indicating the total number of Octo packets sent.
+     */
+    private static final String TOTAL_PACKETS_SENT_OCTO
+        = "total_packets_sent_octo";
 
     /**
      * The name of used memory statistic. Its runtime type is {@code Integer}.
@@ -423,12 +492,23 @@ public class VideobridgeStatistics
             totalFailedConferences = 0, totalPartiallyFailedConferences = 0,
             totalNoTransportChannels = 0, totalNoPayloadChannels = 0,
             totalChannels = 0;
-        long totalConferenceSeconds = 0;
+        long totalConferenceSeconds = 0,
+            totalLossControlledParticipantSeconds = 0,
+            totalLossLimitedParticipantSeconds = 0,
+            totalLossDegradedParticipantSeconds = 0;
         int totalUdpConnections = 0, totalTcpConnections = 0;
         long totalDataChannelMessagesReceived = 0;
         long totalDataChannelMessagesSent = 0;
         long totalColibriWebSocketMessagesReceived = 0;
         long totalColibriWebSocketMessagesSent = 0;
+        long totalBytesReceived = 0;
+        long totalBytesSent = 0;
+        long totalPacketsReceived = 0;
+        long totalPacketsSent = 0;
+        long totalBytesReceivedOcto = 0;
+        long totalBytesSentOcto = 0;
+        long totalPacketsReceivedOcto = 0;
+        long totalPacketsSentOcto = 0;
 
         BundleContext bundleContext
             = StatsManagerBundleActivator.getBundleContext();
@@ -445,6 +525,12 @@ public class VideobridgeStatistics
             totalConferencesCompleted
                 += jvbStats.totalConferencesCompleted.get();
             totalConferenceSeconds += jvbStats.totalConferenceSeconds.get();
+            totalLossControlledParticipantSeconds
+                += jvbStats.totalLossControlledParticipantMs.get() / 1000;
+            totalLossLimitedParticipantSeconds
+                += jvbStats.totalLossLimitedParticipantMs.get() / 1000;
+            totalLossDegradedParticipantSeconds
+                += jvbStats.totalLossDegradedParticipantMs.get() / 1000;
             totalFailedConferences += jvbStats.totalFailedConferences.get();
             totalPartiallyFailedConferences
                 += jvbStats.totalPartiallyFailedConferences.get();
@@ -461,6 +547,14 @@ public class VideobridgeStatistics
                 += jvbStats.totalColibriWebSocketMessagesReceived.get();
             totalColibriWebSocketMessagesSent
                 += jvbStats.totalColibriWebSocketMessagesSent.get();
+            totalBytesReceived += jvbStats.totalBytesReceived.get();
+            totalBytesSent += jvbStats.totalBytesSent.get();
+            totalPacketsReceived += jvbStats.totalPacketsReceived.get();
+            totalPacketsSent += jvbStats.totalPacketsSent.get();
+            totalBytesReceivedOcto += jvbStats.totalBytesReceivedOcto.get();
+            totalBytesSentOcto += jvbStats.totalBytesSentOcto.get();
+            totalPacketsReceivedOcto += jvbStats.totalPacketsReceivedOcto.get();
+            totalPacketsSentOcto += jvbStats.totalPacketsSentOcto.get();
 
 
             for (Conference conference : videobridge.getConferences())
@@ -655,6 +749,12 @@ public class VideobridgeStatistics
             unlockedSetStat(TOTAL_UDP_CONNECTIONS, totalUdpConnections);
             unlockedSetStat(TOTAL_TCP_CONNECTIONS, totalTcpConnections);
             unlockedSetStat(TOTAL_CONFERENCE_SECONDS, totalConferenceSeconds);
+            unlockedSetStat(TOTAL_LOSS_CONTROLLED_PARTICIPANT_SECONDS,
+                totalLossControlledParticipantSeconds);
+            unlockedSetStat(TOTAL_LOSS_LIMITED_PARTICIPANT_SECONDS,
+                    totalLossLimitedParticipantSeconds);
+            unlockedSetStat(TOTAL_LOSS_DEGRADED_PARTICIPANT_SECONDS,
+                    totalLossDegradedParticipantSeconds);
             unlockedSetStat(TOTAL_CHANNELS, totalChannels);
             unlockedSetStat(CONFERENCES, conferences);
             unlockedSetStat(NUMBEROFPARTICIPANTS, endpoints);
@@ -675,6 +775,15 @@ public class VideobridgeStatistics
                             totalColibriWebSocketMessagesReceived);
             unlockedSetStat(TOTAL_COLIBRI_WEB_SOCKET_MESSAGES_SENT,
                             totalColibriWebSocketMessagesSent);
+            unlockedSetStat(TOTAL_BYTES_RECEIVED, totalBytesReceived);
+            unlockedSetStat(TOTAL_BYTES_SENT, totalBytesSent);
+            unlockedSetStat(TOTAL_PACKETS_RECEIVED, totalPacketsReceived);
+            unlockedSetStat(TOTAL_PACKETS_SENT, totalPacketsSent);
+            unlockedSetStat(TOTAL_BYTES_RECEIVED_OCTO, totalBytesReceivedOcto);
+            unlockedSetStat(TOTAL_BYTES_SENT_OCTO, totalBytesSentOcto);
+            unlockedSetStat(TOTAL_PACKETS_RECEIVED_OCTO,
+                            totalPacketsReceivedOcto);
+            unlockedSetStat(TOTAL_PACKETS_SENT_OCTO, totalPacketsSentOcto);
 
             unlockedSetStat(TIMESTAMP, timestamp);
             if (relayId != null)

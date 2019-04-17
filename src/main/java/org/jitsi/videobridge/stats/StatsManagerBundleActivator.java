@@ -101,6 +101,11 @@ public class StatsManagerBundleActivator
     private static final String STAT_TRANSPORT_PUBSUB = "pubsub";
 
     /**
+     * The value used to enable the MUC statistics transport.
+     */
+    private static final String STAT_TRANSPORT_MUC = "muc";
+
+    /**
      * The name of the property which specifies the interval in milliseconds for
      * sending statistics about the Videobridge.
      */
@@ -151,7 +156,7 @@ public class StatsManagerBundleActivator
     private void addTransport(
             StatsManager statsMgr,
             ConfigurationService cfg,
-            long interval,
+            int interval,
             String transport)
     {
         StatsTransport t = null;
@@ -189,11 +194,15 @@ public class StatsManagerBundleActivator
                             + " and/or node found.");
             }
         }
-        else if (transport != null && transport.length() != 0)
+        else if (STAT_TRANSPORT_MUC.equalsIgnoreCase(transport))
+        {
+            logger.info("Using a MUC stats transport");
+            t = new MucStatsTransport();
+        }
+        else
         {
             logger.error(
-                    "Unknown/unsupported statistics transport: "
-                        + transport);
+                    "Unknown/unsupported statistics transport: " + transport);
         }
 
         if (t != null)
@@ -204,7 +213,7 @@ public class StatsManagerBundleActivator
                 = ConfigUtils.getInt(
                         cfg,
                         STATISTICS_INTERVAL_PNAME + "." + transport,
-                        (int) interval);
+                        interval);
 
             // The interval/period of the Statistics better be the same as the
             // interval/period of the StatsTransport.
@@ -234,7 +243,7 @@ public class StatsManagerBundleActivator
     private void addTransports(
             StatsManager statsMgr,
             ConfigurationService cfg,
-            long interval)
+            int interval)
     {
         String transports
             = ConfigUtils.getString(

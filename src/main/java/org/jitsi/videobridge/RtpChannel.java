@@ -262,7 +262,6 @@ public class RtpChannel
      * {@link RawUdpTransportPacketExtension#NAMESPACE}.
      * @param initiator the value to use for the initiator field, or
      * <tt>null</tt> to use the default value.
-     * @throws Exception if an error occurs while initializing the new instance
      */
     public RtpChannel(
             Content content,
@@ -270,7 +269,6 @@ public class RtpChannel
             String channelBundleId,
             String transportNamespace,
             Boolean initiator)
-        throws Exception
     {
         super(content, id, channelBundleId, transportNamespace, initiator);
 
@@ -284,7 +282,7 @@ public class RtpChannel
          * synchronization source identifier (SSRC), which Jitsi Videobridge
          * pre-announces.
          */
-        initialLocalSSRC = Videobridge.RANDOM.nextLong() & 0xffffffffL;
+        initialLocalSSRC = Videobridge.RANDOM.nextLong() & 0xffff_ffffL;
 
         Conference conference = content.getConference();
         conference.addPropertyChangeListener(propertyChangeListener);
@@ -1854,41 +1852,8 @@ public class RtpChannel
             return false;
         }
 
-        if (getContent().getConference().includeInStatistics())
-        {
-            Conference.Statistics conferenceStatistics
-                = getContent().getConference().getStatistics();
-            conferenceStatistics.totalChannels.incrementAndGet();
+        updateStatisticsOnExpire();
 
-            long lastPayloadActivityTime = getLastPayloadActivityTime();
-            long lastTransportActivityTime = getLastTransportActivityTime();
-
-            if (lastTransportActivityTime == 0)
-            {
-                // Check for ICE failures.
-                conferenceStatistics.totalNoTransportChannels.incrementAndGet();
-            }
-
-            if (lastPayloadActivityTime == 0)
-            {
-                // Check for payload.
-                conferenceStatistics.totalNoPayloadChannels.incrementAndGet();
-            }
-
-            TrackStats streamStats
-                = stream.getMediaStreamStats().getSendStats();
-            logger.info(Logger.Category.STATISTICS,
-                        "expire_ch_stats," + getLoggingId() +
-                            " bRecv=" + statistics.bytesReceived +
-                            ",bSent=" + statistics.bytesSent +
-                            ",pRecv=" + statistics.packetsReceived +
-                            ",pSent=" + statistics.packetsSent +
-                            ",bRetr=" + streamStats.getBytesRetransmitted() +
-                            ",bNotRetr=" + streamStats.getBytesNotRetransmitted() +
-                            ",pRetr=" + streamStats.getPacketsRetransmitted() +
-                            ",pNotRetr=" + streamStats.getPacketsNotRetransmitted() +
-                            ",pMiss=" + streamStats.getPacketsMissingFromCache());
-        }
         TransformEngine transformEngine = this.transformEngine;
         if (transformEngine != null)
         {
@@ -1906,6 +1871,84 @@ public class RtpChannel
         }
 
         return true;
+    }
+
+    /**
+     * Updates the statistics of this {@link Channel}'s {@link Conference}. This
+     * should execute only once when the channel closes.
+     */
+    private void updateStatisticsOnExpire()
+    {
+        Conference conference = getContent().getConference();
+        if (conference != null && conference.includeInStatistics())
+        {
+            Conference.Statistics conferenceStatistics
+                = conference.getStatistics();
+            conferenceStatistics.totalChannels.incrementAndGet();
+
+            long lastPayloadActivityTime = getLastPayloadActivityTime();
+            long lastTransportActivityTime = getLastTransportActivityTime();
+
+            if (lastTransportActivityTime == 0)
+            {
+                // Check for ICE failures.
+                conferenceStatistics.totalNoTransportChannels.incrementAndGet();
+            }
+
+            if (lastPayloadActivityTime == 0)
+            {
+                // Check for payload.
+                conferenceStatistics.totalNoPayloadChannels.incrementAndGet();
+            }
+
+            updatePacketsAndBytes(conferenceStatistics);
+
+            MediaStream stream = this.stream;
+            TrackStats streamStats;
+            if (stream != null &&
+                (streamStats = stream.getMediaStreamStats().getSendStats())
+                    != null)
+            {
+                logger.info(Logger.Category.STATISTICS,
+                            "expire_ch_stats," + getLoggingId() +
+                                " bRecv=" + statistics.bytesReceived +
+                                ",bSent=" + statistics.bytesSent +
+                                ",pRecv=" + statistics.packetsReceived +
+                                ",pSent=" + statistics.packetsSent +
+                                ",bRetr=" +
+                                streamStats.getBytesRetransmitted() +
+                                ",bNotRetr=" +
+                                streamStats.getBytesNotRetransmitted() +
+                                ",pRetr=" +
+                                streamStats.getPacketsRetransmitted() +
+                                ",pNotRetr=" +
+                                streamStats.getPacketsNotRetransmitted() +
+                                ",pMiss=" +
+                                streamStats.getPacketsMissingFromCache());
+            }
+        }
+    }
+
+    /**
+     * Updates the packet count and byte count statistics of this
+     * {@link Channel}'s {@link Conference} with the amounts contributed by this
+     * channel. This should execute only once when the channel closes.
+     * @param conferenceStatistics the statistics object to be updated.
+     */
+    protected void updatePacketsAndBytes(
+        Conference.Statistics conferenceStatistics)
+    {
+        if (conferenceStatistics != null)
+        {
+            conferenceStatistics.totalBytesReceived
+                .addAndGet(statistics.bytesReceived);
+            conferenceStatistics.totalBytesSent
+                .addAndGet(statistics.bytesSent);
+            conferenceStatistics.totalPacketsReceived
+                .addAndGet(statistics.packetsReceived);
+            conferenceStatistics.totalPacketsSent
+                .addAndGet(statistics.packetsSent);
+        }
     }
 
     /**
@@ -2064,24 +2107,24 @@ public class RtpChannel
          * Number of bytes sent. Only updated when the {@link MediaStream} is
          * closed.
          */
-        protected long bytesSent = -1;
+        public long bytesSent = -1;
 
         /**
          * Number of bytes received. Only updated when the {@link MediaStream}
          * is closed.
          */
-        protected long bytesReceived = -1;
+        public long bytesReceived = -1;
 
         /**
          * Number of packets sent. Only updated when the {@link MediaStream} is
          * closed.
          */
-        protected long packetsSent = -1;
+        public long packetsSent = -1;
 
         /**
          * Number of packets received. Only updated when the {@link MediaStream}
          * is closed.
          */
-        protected long packetsReceived = -1;
+        public long packetsReceived = -1;
     }
 }

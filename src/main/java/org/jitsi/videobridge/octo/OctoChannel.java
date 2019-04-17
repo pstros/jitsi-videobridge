@@ -44,6 +44,11 @@ public class OctoChannel
         = Logger.getLogger(OctoChannel.class);
 
     /**
+     * Expiration timeout for Octo channels.
+     */
+    private static final int OCTO_EXPIRE = 2 * 60 * 60 * 1000;
+
+    /**
      * The Octo ID of the conference, configured in {@link Conference} as the
      * global ID ({@link Conference#getGid()}).
      */
@@ -107,10 +112,8 @@ public class OctoChannel
      * list of <tt>Channel</tt>s listed in <tt>content</tt> while the new
      * instance
      * is listed there as well.
-     * @throws Exception if an error occurs while initializing the new instance
      */
     public OctoChannel(Content content, String id)
-        throws Exception
     {
         super(
                 content, id, null /*channelBundleId*/,
@@ -131,6 +134,8 @@ public class OctoChannel
 
         logger
             = Logger.getLogger(classLogger, content.getConference().getLogger());
+
+        setExpire(OCTO_EXPIRE);
     }
 
     /**
@@ -416,5 +421,56 @@ public class OctoChannel
     {
         getOctoTransportManager()
             .sendMessage(msg, sourceEndpointId, getConferenceId());
+    }
+
+    /**
+     * {@inheritDoc}
+     * </p>
+     * Updates the octo-specific fields.
+     */
+    @Override
+    protected void updatePacketsAndBytes(
+        Conference.Statistics conferenceStatistics)
+    {
+        if (conferenceStatistics != null)
+        {
+            conferenceStatistics.totalBytesReceivedOcto
+                .addAndGet(statistics.bytesReceived);
+            conferenceStatistics.totalBytesSentOcto
+                .addAndGet(statistics.bytesSent);
+            conferenceStatistics.totalPacketsReceivedOcto
+                .addAndGet(statistics.packetsReceived);
+            conferenceStatistics.totalPacketsSentOcto
+                .addAndGet(statistics.packetsSent);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public boolean expire()
+    {
+        if (super.expire())
+        {
+            octoEndpoints.setChannel(getMediaType(), null);
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Don't expire Octo channels due to lack of transport activity, but allow
+     * for them to be explicitly expired by signaling (by setting expire=0).
+     */
+    @Override
+    public void setExpire(int expire)
+    {
+        if (expire > 0)
+        {
+            expire = Math.max(expire, OCTO_EXPIRE);
+        }
+        super.setExpire(expire);
     }
 }

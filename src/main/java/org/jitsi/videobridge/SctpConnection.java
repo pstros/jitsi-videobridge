@@ -20,6 +20,7 @@ import java.net.*;
 import java.nio.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.function.*;
 import java.util.logging.*;
 
 import net.java.sip.communicator.impl.protocol.jabber.extensions.jingle.*;
@@ -161,13 +162,14 @@ public class SctpConnection
     private final int debugId;
 
     /**
-     * The <tt>AsyncExecutor</tt> which is to asynchronously dispatch the events
-     * fired by this instance in order to prevent possible listeners from
-     * blocking this <tt>SctpConnection</tt> in general and {@link #sctpSocket}
-     * in particular for too long. The timeout of <tt>15</tt> is chosen to be in
+     * The <tt>AsyncExecutor</tt> which is used to order incoming SCTP packet's
+     * processing and dispatching of the {@link SctpConnection} related events
+     * like the data channel opened event.
+     *
+     * The timeout of <tt>15</tt> is chosen to be in
      * accord with the time it takes to expire a <tt>Channel</tt>.
      */
-    private final AsyncExecutor<Runnable> eventDispatcher
+    private final AsyncExecutor<Runnable> sctpDispatcher
         = new AsyncExecutor<>(15, TimeUnit.MILLISECONDS);
 
     /**
@@ -175,6 +177,16 @@ public class SctpConnection
      * new WebRTC data channel is opened.
      */
     private final List<WebRtcDataStreamListener> listeners = new ArrayList<>();
+
+    /**
+     * There's the SCTP socket accept task running as the first task in
+     * the {@link #sctpDispatcher} which blocks any SCTP packet processing until
+     * the SCTP socket is writeable. This lock is used to notify the accept
+     * task about the SCTP_COMM_UP notification which signals that a SCTP
+     * association has been established. It only matters for the case where it
+     * has not occurred before the sctpSocket.accept() returned.
+     */
+    private final Object isReadyWaitLock = new Object();
 
     /**
      * Remote SCTP port.
@@ -234,7 +246,6 @@ public class SctpConnection
      * @param channelBundleId the ID of the channel-bundle this
      * <tt>SctpConnection</tt> is to be a part of (or <tt>null</tt> if no it is
      * not to be a part of a channel-bundle).
-     * @throws Exception if an error occurs while initializing the new instance
      */
     public SctpConnection(
             String id,
@@ -243,7 +254,6 @@ public class SctpConnection
             int remoteSctpPort,
             String channelBundleId,
             Boolean initiator)
-        throws Exception
     {
         super(content,
               id,
@@ -351,9 +361,26 @@ public class SctpConnection
             return false;
         }
 
-        eventDispatcher.shutdown();
+        sctpDispatcher.shutdown();
 
         return true;
+    }
+
+    /**
+     * Allows to loop over available WebRTC data channels instances.
+     *
+     * @param action the action to be executed for each data channel's instance.
+     */
+    public void forEachDataStream(Consumer<WebRtcDataStream> action)
+    {
+        ArrayList<WebRtcDataStream> streams;
+
+        synchronized (syncRoot)
+        {
+            streams = new ArrayList<>(channels.values());
+        }
+
+        streams.forEach(action);
     }
 
     /**
@@ -384,41 +411,51 @@ public class SctpConnection
     }
 
     /**
-     * Returns default <tt>WebRtcDataStream</tt> if it's ready or <tt>null</tt>
-     * otherwise.
-     * @return <tt>WebRtcDataStream</tt> if it's ready or <tt>null</tt>
-     *         otherwise.
-     * @throws IOException
+     * Select a WebRTC data channel that should be used for writing by default.
+     *
+     * The strategy is try to select client's data channel with the highest SID
+     * number first. A data channel with the highest SID will usually be the
+     * most recent one, because the WebRTC stack tries to allocate SIDs in
+     * order.
+     *
+     * The distinction between client's opened channels vs JVB opened channels
+     * comes from the fact that the RFC requires the DTLS initiator to use even
+     * SID numbers and the responder to use odd numbers.
+     *
+     * @return a writeable <tt>WebRtcDataStream</tt> if it's ready or
+     * <tt>null</tt> otherwise.
      */
     public WebRtcDataStream getDefaultDataStream()
-        throws IOException
     {
-        WebRtcDataStream def;
-
         synchronized (syncRoot)
         {
-            if (sctpSocket == null)
+            if (sctpSocket != null)
             {
-                def = null;
-            }
-            else
-            {
-                // Channel that runs on sid 0
-                def = channels.get(0);
-                if (def == null)
-                    def = openChannel(0, 0, 0, 0, "default");
+                // Tries to elect a stream with the highest client SID
+                WebRtcDataStream highestClientSid
+                    = channels.values()
+                        .stream()
+                        .filter(
+                            s -> isInitiator()
+                                ? s.getSid() % 2 == 1
+                                : s.getSid() % 2 == 0)
+                        .max(Comparator.comparingInt(WebRtcDataStream::getSid))
+                        .orElse(null);
 
-                // Pawel Domas: Must be acknowledged before use.
-                // XXX Lyubomir Marinov: We're always sending ordered. According
-                // to "WebRTC Data Channel Establishment Protocol", we can start
-                // sending messages containing user data after the
-                // DATA_CHANNEL_OPEN message has been sent without waiting for
-                // the reception of the corresponding DATA_CHANNEL_ACK message.
-//                if (!def.isAcknowledged())
-//                    def = null;
+                if (highestClientSid != null)
+                {
+                    return highestClientSid;
+                }
+
+                // Return the highest SID (probably will be the JVB's one)
+                return channels.values()
+                    .stream()
+                    .max(Comparator.comparingInt(WebRtcDataStream::getSid))
+                    .orElse(null);
             }
+
+            return null;
         }
-        return def;
     }
 
     /**
@@ -434,11 +471,40 @@ public class SctpConnection
     }
 
     /**
+     * This method will try to open a default WebRTC data channel if it hasn't
+     * been opened by the client already.
+     *
+     * When the client is opening the channel, what's been observed is that
+     * there are incoming SCTP packets with MSG_OPEN_CHANNEL queued onto
+     * the {@link #sctpDispatcher}, before the call to sctpSocket.accept
+     * returns. Those packets will not be processed until it does, because
+     * the {@link #sctpDispatcher} is a single threaded executor which
+     * preserves the order. It's important to note that the call to this method
+     * is queued after those packets, because it happens after sctpSocket.accept
+     * returned. This should make the check for opened channels reliable enough
+     * to prevent from opening unnecessary channels most of the time.
+     */
+    private void maybeOpenDefaultWebRTCDataChannel()
+    {
+        boolean openChannel;
+
+        synchronized (syncRoot)
+        {
+            openChannel
+                = !isExpired() && sctpSocket != null && channels.size() == 0;
+        }
+
+        if (openChannel)
+        {
+            openDefaultWebRTCDataChannel();
+        }
+    }
+
+    /**
      * {@inheritDoc}
      */
     @Override
     protected void maybeStartStream()
-        throws IOException
     {
         // connector
         final StreamConnector connector = getStreamConnector();
@@ -452,61 +518,47 @@ public class SctpConnection
                 return;
 
             threadPool.execute(
-                    new Runnable()
+                () -> {
+                    try
                     {
-                        @Override
-                        public void run()
+                        Sctp.init();
+
+                        runOnDtlsTransport(connector);
+                    }
+                    catch (IOException e)
+                    {
+                        logger.error(e, e);
+                    }
+                    finally
+                    {
+                        try
                         {
-                            try
-                            {
-                                Sctp.init();
-        
-                                runOnDtlsTransport(connector);
-                            }
-                            catch (IOException e)
-                            {
-                                logger.error(e, e);
-                            }
-                            finally
-                            {
-                                try
-                                {
-                                    Sctp.finish();
-                                }
-                                catch (IOException e)
-                                {
-                                    logger.error(
-                                            "Failed to shutdown SCTP stack",
-                                            e);
-                                }
-                            }
+                            Sctp.finish();
                         }
-                    });
+                        catch (IOException e)
+                        {
+                            logger.error("Failed to shutdown SCTP stack", e);
+                        }
+                    }
+                });
 
             started = true;
         }
     }
 
     /**
-     * Submits {@link #notifyChannelOpenedInEventDispatcher(WebRtcDataStream)}
-     * to {@link #eventDispatcher} for asynchronous execution.
+     * Notifies listeners about WebRTC data channel opened event.
+     *
+     * This notification is executed from the {@link #sctpDispatcher}, so that
+     * it's in sync with how the SCTP packets are processed allowing any data
+     * callbacks to be set immediately when the data channel is open without
+     * missing any packets. When the {@link #MSG_OPEN_CHANNEL} message arrives
+     * no further packets are processed until all listener have been notified.
      *
      * @param dataChannel
      */
     private void notifyChannelOpened(final WebRtcDataStream dataChannel)
     {
-        if (!isExpired())
-        {
-            eventDispatcher.execute(
-                () -> notifyChannelOpenedInEventDispatcher(dataChannel));
-        }
-    }
-
-    private void notifyChannelOpenedInEventDispatcher(
-            WebRtcDataStream dataChannel)
-    {
-        // When executing asynchronously in eventDispatcher, it is technically
-        // possible that this SctpConnection may have expired by now.
         if (!isExpired())
         {
             WebRtcDataStreamListener[] ls = getChannelListeners();
@@ -516,44 +568,6 @@ public class SctpConnection
                 for (WebRtcDataStreamListener l : ls)
                 {
                     l.onChannelOpened(this, dataChannel);
-                }
-            }
-        }
-    }
-
-    /**
-     * Submits {@link #notifySctpConnectionReadyInEventDispatcher()} to
-     * {@link #eventDispatcher} for asynchronous execution.
-     */
-    private void notifySctpConnectionReady()
-    {
-        if (!isExpired())
-        {
-            eventDispatcher.execute(
-                this::notifySctpConnectionReadyInEventDispatcher);
-        }
-    }
-
-    /**
-     * Notifies the <tt>WebRtcDataStreamListener</tt>s added to this instance
-     * that this <tt>SctpConnection</tt> is ready i.e. it is connected to the
-     * remote peer and operational.
-     */
-    private void notifySctpConnectionReadyInEventDispatcher()
-    {
-        /*
-         * When executing asynchronously in eventDispatcher, it is technically
-         * possible that this SctpConnection may have expired by now.
-         */
-        if (!isExpired() && isReady())
-        {
-            WebRtcDataStreamListener[] ls = getChannelListeners();
-
-            if (ls != null)
-            {
-                for (WebRtcDataStreamListener l : ls)
-                {
-                    l.onSctpConnectionReady(this);
                 }
             }
         }
@@ -672,14 +686,19 @@ public class SctpConnection
             WebRtcDataStream.DataCallback oldCallback = null;
             if (channels.containsKey(sid))
             {
-                logger.log(Level.WARNING, Logger.Category.STATISTICS,
+                // FIXME According to the RFC the DTLS initiator should be using
+                // even and the responder odd SID numbers, so such conflict
+                // should never happen. If it happens then the JVB should
+                // shutdown (reset) the SCTP stream identified by
+                // the conflicting SID.
+                logger.log(Level.SEVERE, Logger.Category.STATISTICS,
                            "sctp_channel_exists," + getLoggingId()
                            + " sid=" + sid);
                 oldCallback = channels.get(sid).getDataCallback();
             }
 
             WebRtcDataStream newChannel
-                = new WebRtcDataStream(sctpSocket, sid, label, true);
+                = new WebRtcDataStream(this, sctpSocket, sid, label, true);
             channels.put(sid, newChannel);
 
             if (oldCallback != null)
@@ -747,13 +766,13 @@ public class SctpConnection
                 switch (assocChange.state)
                 {
                 case SctpNotification.AssociationChange.SCTP_COMM_UP:
-                    if (!assocIsUp)
+                    synchronized (isReadyWaitLock)
                     {
-                        boolean wasReady = isReady();
-
-                        assocIsUp = true;
-                        if (isReady() && !wasReady)
-                            notifySctpConnectionReady();
+                        if (!assocIsUp)
+                        {
+                            assocIsUp = true;
+                            isReadyWaitLock.notifyAll();
+                        }
                     }
                     break;
 
@@ -769,6 +788,43 @@ public class SctpConnection
     }
 
     /**
+     * Opens new WebRTC data channel.
+     */
+    private void openDefaultWebRTCDataChannel()
+    {
+        try
+        {
+            // XXX RFC says that the DTLS initiator uses even and responder odd
+            // SID numbers for the channels they open. It's important to note
+            // here that more complex logic ensuring SID correctness and
+            // availability will be required if the bridge would be to open more
+            // than 1 channel. The JVB is still able to handle multiple incoming
+            // channels because it's the client that verifies that it's SID
+            // numbers.
+            int sid = isInitiator() ? 0 : 1;
+
+            logger.debug(String.format(
+                "Will open default WebRTC data channel for: %s next SID: %d",
+                getLoggingId(), sid));
+
+            openChannel(
+                /* type */ 0,
+                /* prio */ 0,
+                /* reliab - 0 means reliable and ordered */ 0,
+                /* sid */ sid,
+                /* label */ "default");
+        }
+        catch (IOException e)
+        {
+            logger.error(
+                String.format(
+                    "Could open the default data stream for endpoint: %s",
+                    getLoggingId()),
+                e);
+        }
+    }
+
+    /**
      * {@inheritDoc}
      *
      * SCTP input data callback.
@@ -778,61 +834,12 @@ public class SctpConnection
             byte[] data, int sid, int ssn, int tsn, long ppid, int context,
             int flags)
     {
-        if (ppid == WEB_RTC_PPID_CTRL)
-        {
-            // Channel control PPID
-            try
+        sctpDispatcher.execute(() -> {
+            if (!isExpired() && sctpSocket != null)
             {
-                onCtrlPacket(data, sid);
+                processSctpPacket(data, sid, ssn, tsn, ppid, context, flags);
             }
-            catch (IOException e)
-            {
-                logger.error("IOException when processing ctrl packet", e);
-            }
-        }
-        else if (ppid == WEB_RTC_PPID_STRING || ppid == WEB_RTC_PPID_BIN)
-        {
-            WebRtcDataStream channel;
-
-            synchronized (syncRoot)
-            {
-                channel = channels.get(sid);
-            }
-
-            if (channel == null)
-            {
-                logger.error("No channel found for sid: " + sid);
-                return;
-            }
-            if (ppid == WEB_RTC_PPID_STRING)
-            {
-                // WebRTC String
-                String str;
-                String charsetName = "UTF-8";
-
-                try
-                {
-                    str = new String(data, charsetName);
-                }
-                catch (UnsupportedEncodingException uee)
-                {
-                    logger.error(
-                            "Unsupported charset encoding/name " + charsetName,
-                            uee);
-                    str = null;
-                }
-                channel.onStringMsg(str);
-            }
-            else
-            {
-                // WebRTC Binary
-                channel.onBinaryMsg(data);
-            }
-        }
-        else
-        {
-            logger.warn("Got message on unsupported PPID: " + ppid);
-        }
+        });
     }
 
     /**
@@ -942,11 +949,78 @@ public class SctpConnection
             throw new IOException("Failed to open new chanel on sid: " + sid);
 
         WebRtcDataStream channel
-            = new WebRtcDataStream(sctpSocket, sid, label, false);
+            = new WebRtcDataStream(this, sctpSocket, sid, label, false);
 
         channels.put(sid, channel);
 
         return channel;
+    }
+
+    /**
+     * Method called from
+     * {@link #onSctpPacket(byte[], int, int, int, long, int, int)} which
+     * processes incoming SCTP packets.
+     *
+     * @see {@link SctpDataCallback#onSctpPacket(byte[], int, int, int, long, int, int)}
+     * for arguments description.
+     */
+    private void processSctpPacket(
+            byte[] data,
+            int sid, int ssn, int tsn, long ppid, int context, int flags)
+    {
+        if (ppid == WEB_RTC_PPID_CTRL)
+        {
+            // Channel control PPID
+            try
+            {
+                onCtrlPacket(data, sid);
+            }
+            catch (IOException e)
+            {
+                logger.error("IOException when processing ctrl packet", e);
+            }
+        }
+        else if (ppid == WEB_RTC_PPID_STRING || ppid == WEB_RTC_PPID_BIN)
+        {
+            WebRtcDataStream channel;
+
+            synchronized (syncRoot)
+            {
+                channel = channels.get(sid);
+            }
+
+            if (channel == null)
+            {
+                logger.error("No channel found for sid: " + sid);
+                return;
+            }
+            if (ppid == WEB_RTC_PPID_STRING)
+            {
+                // WebRTC String
+                String charsetName = "UTF-8";
+
+                try
+                {
+                    final String str = new String(data, charsetName);
+                    channel.onStringMsg(str);
+                }
+                catch (UnsupportedEncodingException uee)
+                {
+                    logger.error(
+                        "Unsupported charset encoding/name " + charsetName,
+                        uee);
+                }
+            }
+            else
+            {
+                // WebRTC Binary
+                channel.onBinaryMsg(data);
+            }
+        }
+        else
+        {
+            logger.warn("Got message on unsupported PPID: " + ppid);
+        }
     }
 
     /**
@@ -1037,51 +1111,9 @@ public class SctpConnection
         sctpSocket.setNotificationListener(this);
         sctpSocket.listen();
 
-        // Notify that from now on SCTP connection is considered functional
         sctpSocket.setDataCallback(this);
 
-        // FIXME manage threads
-        threadPool.execute(
-                new Runnable()
-                {
-                    @Override
-                    public void run()
-                    {
-                        SctpSocket sctpSocket = null;
-                        try
-                        {
-                            // sctpSocket is set to null on close
-                            sctpSocket = SctpConnection.this.sctpSocket;
-                            while (sctpSocket != null)
-                            {
-                                if (sctpSocket.accept())
-                                {
-                                    acceptedIncomingConnection = true;
-                                    logger.info("SCTP socket accepted for "
-                                            + "endpoint "
-                                            + getEndpoint().getID());
-                                    break;
-                                }
-                                Thread.sleep(100);
-                                sctpSocket = SctpConnection.this.sctpSocket;
-                            }
-                            if (isReady())
-                            {
-                                notifySctpConnectionReady();
-                            }
-                        }
-                        catch (Exception e)
-                        {
-                            logger.error("Error accepting SCTP connection", e);
-                        }
-
-                        if (sctpSocket == null && logger.isInfoEnabled())
-                        {
-                            logger.info("SctpConnection " + getID() + " closed"
-                                        + " before SctpSocket accept()-ed.");
-                        }
-                    }
-                });
+        sctpDispatcher.execute(this::acceptIncomingSctpConnection);
 
         // Setup iceSocket
         DatagramSocket datagramSocket = connector.getDataSocket();
@@ -1176,6 +1208,71 @@ public class SctpConnection
             closeStream();
         }
     }
+
+    /**
+     * This is the first task executed on the {@link #sctpDispatcher} which
+     * accepts the incoming connection on the SCTP socket and blocks until
+     * the SCTP association is up. All incoming packets are also queued on the
+     * {@link #sctpDispatcher}, so that they are processed only when the SCTP
+     * sockets is fully operational. It's been noticed that if the remote
+     * party send some messages they would arrive, before the accept() has
+     * returned.
+     *
+     * Pawel: I suspect it's because of the Thread.sleep(100), but there was
+     * no reliable way to workaround that. We want the socket to be non blocking
+     * and in such config the accept() needs to be polled.
+     */
+    private void acceptIncomingSctpConnection()
+    {
+        SctpSocket sctpSocket = null;
+        try
+        {
+            // sctpSocket is set to null on close
+            sctpSocket = SctpConnection.this.sctpSocket;
+            while (sctpSocket != null)
+            {
+                if (sctpSocket.accept())
+                {
+                    acceptedIncomingConnection = true;
+                    logger.info(
+                        String.format("SCTP socket accepted on %s",
+                            getLoggingId()));
+                    break;
+                }
+                Thread.sleep(100);
+                sctpSocket = SctpConnection.this.sctpSocket;
+            }
+            // Implement waiting for ready
+            synchronized (isReadyWaitLock)
+            {
+                while (sctpSocket != null && !isExpired() && !isReady())
+                {
+                    isReadyWaitLock.wait();
+                    sctpSocket = SctpConnection.this.sctpSocket;
+                }
+                // See maybeOpenDefaultWebRTCDataChannel's description
+                sctpDispatcher.execute(
+                    this::maybeOpenDefaultWebRTCDataChannel);
+            }
+        }
+        catch (Exception e)
+        {
+            logger.error(
+                String.format(
+                    "Error accepting SCTP connection %s",
+                    getLoggingId()),
+                e);
+        }
+
+        if (sctpSocket == null)
+        {
+            logger.info(String.format(
+                "SctpConnection %s closed before SctpSocket accept()-ed.",
+                getLoggingId()));
+        }
+    }
+
+
 
     /**
      * Sends acknowledgment for open channel request on given SCTP stream ID.

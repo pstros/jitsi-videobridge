@@ -105,19 +105,6 @@ public class VideoChannel
             ? new int[0] : new int[] { 1, 2 };
 
     /**
-     * The default value that indicates whether or not to enable the lipsync
-     * hack.
-     */
-    private static final boolean ENABLE_LIPSYNC_HACK_DEFAULT = false;
-
-    /**
-     * The value that indicates whether or not to enable the lipsync hack.
-     */
-    private static final boolean ENABLE_LIPSYNC_HACK
-        = cfg != null && cfg.getBoolean(
-            ENABLE_LIPSYNC_HACK_PNAME, ENABLE_LIPSYNC_HACK_DEFAULT);
-
-    /**
      * The default maximum frame height (in pixels) that can be forwarded to
      * this participant
      */
@@ -147,11 +134,6 @@ public class VideoChannel
      * receives.
      */
     private final boolean disableLastNNotifications;
-
-    /**
-     * The object that implements a hack for LS for this {@link Endpoint}.
-     */
-    private final LipSyncHack lipSyncHack;
 
     /**
      * Maximum frame height, in pixels, for any video stream forwarded to this receiver
@@ -236,14 +218,12 @@ public class VideoChannel
      * or {@link RawUdpTransportPacketExtension#NAMESPACE}.
      * @param initiator the value to use for the initiator field, or
      * <tt>null</tt> to use the default value.
-     * @throws Exception if an error occurs while initializing the new instance
      */
     VideoChannel(Content content,
                  String id,
                  String channelBundleId,
                  String transportNamespace,
                  Boolean initiator)
-        throws Exception
     {
         super(content, id, channelBundleId, transportNamespace, initiator);
 
@@ -251,8 +231,6 @@ public class VideoChannel
             = Logger.getLogger(
                     classLogger,
                     content.getConference().getLogger());
-
-        this.lipSyncHack = ENABLE_LIPSYNC_HACK ? new LipSyncHack(this) : null;
 
         disableLastNNotifications = cfg != null
             && cfg.getBoolean(DISABLE_LASTN_NOTIFICATIONS_PNAME, false);
@@ -281,8 +259,7 @@ public class VideoChannel
         throws IOException
     {
         MediaStream stream = getStream();
-        boolean previouslyStarted
-            = stream != null ? stream.isStarted() : false;
+        boolean previouslyStarted = stream != null && stream.isStarted();
 
         super.maybeStartStream();
 
@@ -294,8 +271,7 @@ public class VideoChannel
         // keyframe from other channels if needed.
 
         stream = getStream();
-        boolean currentlyStarted
-            = stream != null ? stream.isStarted() : false;
+        boolean currentlyStarted = stream != null && stream.isStarted();
 
         if (currentlyStarted && !previouslyStarted)
         {
@@ -340,18 +316,6 @@ public class VideoChannel
     public BitrateController getBitrateController()
     {
         return bitrateController;
-    }
-
-    /**
-     * Gets the object that implements a hack for LS for this
-     * {@link VideoChannel}.
-     *
-     * @return the object that implements a hack for LS for this
-     * {@link VideoChannel}.
-     */
-    public LipSyncHack getLipSyncHack()
-    {
-        return lipSyncHack;
     }
 
     /**
@@ -410,15 +374,7 @@ public class VideoChannel
             return true;
         }
 
-        boolean accept = bitrateController.accept(pkt);
-
-        if (accept && lipSyncHack != null)
-        {
-            lipSyncHack
-                .onRTPTranslatorWillWriteVideo(pkt, source);
-        }
-
-        return accept;
+        return bitrateController.accept(pkt);
     }
 
     /**
@@ -471,6 +427,39 @@ public class VideoChannel
         {
             recurringExecutor
                 .deRegisterRecurringRunnable(bandwidthProbing);
+        }
+
+        MediaStream mediaStream = getStream();
+        if (mediaStream instanceof VideoMediaStream)
+        {
+            BandwidthEstimator bwe = ((VideoMediaStream) mediaStream)
+                .getOrCreateBandwidthEstimator();
+
+            if (bwe != null)
+            {
+                BandwidthEstimator.Statistics bweStats = bwe.getStatistics();
+                if (bweStats != null)
+                {
+                    bweStats.update(System.currentTimeMillis());
+
+                    Videobridge.Statistics videobridgeStats
+                        = getContent().getConference().getVideobridge()
+                        .getStatistics();
+
+                    long lossLimitedMs = bweStats.getLossLimitedMs();
+                    long lossDegradedMs = bweStats.getLossDegradedMs();
+                    long participantMs = bweStats.getLossFreeMs()
+                        + lossDegradedMs + lossLimitedMs;
+
+                    videobridgeStats.totalLossControlledParticipantMs
+                        .addAndGet(participantMs);
+                    videobridgeStats.totalLossLimitedParticipantMs
+                        .addAndGet(lossLimitedMs);
+
+                    videobridgeStats.totalLossDegradedParticipantMs
+                        .addAndGet(lossDegradedMs);
+                }
+            }
         }
 
         return true;
@@ -612,7 +601,7 @@ public class VideoChannel
         }
 
         MediaStream mediaStream = getStream();
-        if (mediaStream != null && mediaStream instanceof VideoMediaStreamImpl)
+        if (mediaStream instanceof VideoMediaStreamImpl)
         {
             ((VideoMediaStreamImpl) mediaStream).setSupportsFir(supportsFir);
             ((VideoMediaStreamImpl) mediaStream).setSupportsPli(supportsPli);

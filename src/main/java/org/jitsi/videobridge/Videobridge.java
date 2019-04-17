@@ -15,6 +15,7 @@
  */
 package org.jitsi.videobridge;
 
+import java.io.*;
 import java.util.*;
 import java.util.concurrent.atomic.*;
 import java.util.regex.*;
@@ -39,6 +40,7 @@ import org.jitsi.util.Logger;
 import org.jitsi.videobridge.health.*;
 import org.jitsi.videobridge.octo.*;
 import org.jitsi.videobridge.pubsub.*;
+import org.jitsi.videobridge.util.*;
 import org.jitsi.videobridge.xmpp.*;
 import org.jitsi.xmpp.util.*;
 import org.jivesoftware.smack.packet.*;
@@ -216,6 +218,12 @@ public class Videobridge
      * execute expire procedure for any of them.
      */
     private VideobridgeExpireThread videobridgeExpireThread;
+
+    /**
+     * The {@link Health} instance responsible for periodically performing
+     * health checks on this videobridge.
+     */
+    private Health health;
 
     /**
      * Initializes a new <tt>Videobridge</tt> instance.
@@ -609,11 +617,8 @@ public class Videobridge
      * @return an <tt>org.jivesoftware.smack.packet.IQ</tt> stanza which
      * represents the response to the specified request or <tt>null</tt> to
      * reply with <tt>feature-not-implemented</tt>
-     * @throws Exception to reply with <tt>internal-server-error</tt> to the
-     * specified request
      */
     public IQ handleColibriConferenceIQ(ColibriConferenceIQ conferenceIQ)
-        throws Exception
     {
         return
             handleColibriConferenceIQ(conferenceIQ, defaultProcessingOptions);
@@ -659,13 +664,10 @@ public class Videobridge
      * @return an <tt>org.jivesoftware.smack.packet.IQ</tt> stanza which
      * represents the response to the specified request or <tt>null</tt> to
      * reply with <tt>feature-not-implemented</tt>
-     * @throws Exception to reply with <tt>internal-server-error</tt> to the
-     * specified request
      */
     public IQ handleColibriConferenceIQ(
             ColibriConferenceIQ conferenceIQ,
             int options)
-        throws Exception
     {
         Jid focus = conferenceIQ.getFrom();
         Conference conference;
@@ -828,13 +830,22 @@ public class Videobridge
                                 XMPPError.Condition.bad_request,
                                 "Channel expire request for empty ID");
                     }
-                    channel
-                        = content.createRtpChannel(
+
+                    try
+                    {
+                        channel
+                            = content.createRtpChannel(
                                 channelBundleId,
                                 transportNamespace,
                                 channelIQ.isInitiator(),
                                 channelIQ.getRTPLevelRelayType(),
                                 octoChannelIQ != null);
+                    }
+                    catch (IOException ioe)
+                    {
+                        logger.error("Failed to create RtpChannel:", ioe);
+                        channel = null;
+                    }
 
                     if (channel == null)
                     {
@@ -1039,12 +1050,21 @@ public class Videobridge
                     {
                         int sctpPort = sctpConnIq.getPort();
 
-                        sctpConn
-                            = content.createSctpConnection(
+                        try
+                        {
+                            sctpConn
+                                = content.createSctpConnection(
                                     endpoint,
                                     sctpPort,
                                     channelBundleId,
                                     sctpConnIq.isInitiator());
+                        }
+                        catch (IOException ioe)
+                        {
+                            logger.error("Failed to create SctpConnection:", ioe);
+                            sctpConn = null;
+                        }
+
                         if (sctpConn == null)
                         {
                             return IQUtils.createError(
@@ -1197,17 +1217,39 @@ public class Videobridge
 
         try
         {
-            Health.check(this);
+            healthCheck();
 
             return IQ.createResultIQ(healthCheckIQ);
         }
         catch (Exception e)
         {
+            e.printStackTrace();
             return
                 IQUtils.createError(
                         healthCheckIQ,
                         XMPPError.Condition.internal_server_error,
                         e.getMessage());
+        }
+    }
+
+    /**
+     * Checks the health of this {@link Videobridge}. If it is healthy it just
+     * returns silently, otherwise it throws an exception. Note that this
+     * method does not perform any tests, but only checks the cached value
+     * provided by the bridge's {@link Health} instance.
+     *
+     * @throws Exception if the videobridge is not healthy.
+     */
+    public void healthCheck()
+        throws Exception
+    {
+        if (health == null)
+        {
+            throw new Exception("No health checks running");
+        }
+        else
+        {
+            health.check();
         }
     }
 
@@ -1269,7 +1311,6 @@ public class Videobridge
     }
 
     public void handleIQResponse(org.jivesoftware.smack.packet.IQ response)
-        throws Exception
     {
         PubSubPublisher.handleIQResponse(response);
     }
@@ -1297,7 +1338,9 @@ public class Videobridge
             = ServiceUtils.getService(
                 getBundleContext(), ConfigurationService.class);
 
-        return config.getBoolean(Videobridge.XMPP_API_PNAME, false);
+        // The XMPP API is disabled by default.
+        return config != null &&
+            config.getBoolean(Videobridge.XMPP_API_PNAME, false);
     }
 
     /**
@@ -1364,12 +1407,19 @@ public class Videobridge
     void start(final BundleContext bundleContext)
         throws Exception
     {
+        UlimitCheck.printUlimits();
+
         ConfigurationService cfg
             = ServiceUtils2.getService(
                     bundleContext,
                     ConfigurationService.class);
 
         videobridgeExpireThread.start(bundleContext);
+        if (health != null)
+        {
+            health.stop();
+        }
+        health = new Health(this, cfg);
 
         defaultProcessingOptions
             = (cfg == null)
@@ -1551,14 +1601,6 @@ public class Videobridge
                 }
             }
 
-            String enableLipSync
-                = cfg.getString(Endpoint.ENABLE_LIPSYNC_HACK_PNAME);
-            if (enableLipSync != null)
-            {
-                System.setProperty(
-                    VideoChannel.ENABLE_LIPSYNC_HACK_PNAME, enableLipSync);
-            }
-
             String disableNackTerminaton
                 = cfg.getString(VideoChannel.DISABLE_NACK_TERMINATION_PNAME);
             if (disableNackTerminaton != null)
@@ -1598,8 +1640,86 @@ public class Videobridge
     void stop(BundleContext bundleContext)
         throws Exception
     {
-        videobridgeExpireThread.stop(bundleContext);
-        this.bundleContext = null;
+        try
+        {
+            if (health != null)
+            {
+                health.stop();
+                health = null;
+            }
+
+            ConfigurationService cfg
+                = ServiceUtils2.getService(
+                    bundleContext,
+                    ConfigurationService.class);
+
+            stopIce4j(bundleContext, cfg);
+        }
+        finally
+        {
+            videobridgeExpireThread.stop(bundleContext);
+            this.bundleContext = null;
+        }
+    }
+
+    /**
+     * Implements the ice4j-related portion of {@link #stop(BundleContext)}.
+     *
+     * @param bundleContext the {@code BundleContext} in which this
+     * {@code Videobridge} is to start
+     * @param cfg the {@code ConfigurationService} registered in
+     * {@code bundleContext}. Explicitly provided for the sake of performance.
+     */
+    private void stopIce4j(
+        BundleContext bundleContext,
+        ConfigurationService cfg)
+    {
+        // Shut down harvesters.
+        IceUdpTransportManager.closeStaticConfiguration(cfg);
+
+        // Clear all system properties that were ice4j properties. This is done
+        // to deal with any properties that are conditionally set during
+        // initialization. If the conditions have changed upon restart (of the
+        // component, rather than the JVM), it would not be enough to "not set"
+        // the system property (as it would have survived the restart).
+        if (cfg != null)
+        {
+            List<String> ice4jPropertyNames
+                = cfg.getPropertyNamesByPrefix("org.ice4j.", false);
+
+            if (ice4jPropertyNames != null && !ice4jPropertyNames.isEmpty())
+            {
+                for (String propertyName : ice4jPropertyNames)
+                {
+                    System.clearProperty(propertyName);
+                }
+            }
+
+            // These properties are moved to ice4j. This is to make sure that we
+            // still support the old names.
+            String oldPrefix = "org.jitsi.videobridge";
+            String newPrefix = "org.ice4j.ice.harvest";
+            for (String propertyName : new String[]{
+                HarvesterConfiguration.NAT_HARVESTER_LOCAL_ADDRESS,
+                HarvesterConfiguration.NAT_HARVESTER_PUBLIC_ADDRESS,
+                HarvesterConfiguration.DISABLE_AWS_HARVESTER,
+                HarvesterConfiguration.FORCE_AWS_HARVESTER,
+                HarvesterConfiguration.STUN_MAPPING_HARVESTER_ADDRESSES})
+            {
+                String propertyValue = cfg.getString(propertyName);
+
+                if (propertyValue != null)
+                {
+                    String newPropertyName
+                        = newPrefix
+                        + propertyName.substring(oldPrefix.length());
+                    System.clearProperty(newPropertyName);
+                }
+            }
+
+            System.clearProperty(VideoChannel.ENABLE_LIPSYNC_HACK_PNAME);
+            System.clearProperty(RtxTransformer.DISABLE_NACK_TERMINATION_PNAME);
+        }
     }
 
     /**
@@ -1762,6 +1882,26 @@ public class Videobridge
         public AtomicLong totalConferenceSeconds = new AtomicLong();
 
         /**
+         * The total number of participant-milliseconds that are loss-controlled
+         * (i.e. the sum of the lengths is seconds) on this {@link Videobridge}.
+         */
+        public AtomicLong totalLossControlledParticipantMs = new AtomicLong();
+
+        /**
+         * The total number of participant-milliseconds that are loss-limited
+         * on this {@link Videobridge}.
+         */
+        public AtomicLong totalLossLimitedParticipantMs = new AtomicLong();
+
+        /**
+         * The total number of participant-milliseconds that are loss-degraded
+         * on this {@link Videobridge}. We chose the unit to be millis because
+         * we expect that a lot of our calls spend very few ms (<500) in the
+         * lossDegraded state for example, and they might get cut to 0.
+         */
+        public AtomicLong totalLossDegradedParticipantMs = new AtomicLong();
+
+        /**
          * The total number of ICE transport managers on this videobridge which
          * successfully connected over UDP.
          */
@@ -1796,5 +1936,59 @@ public class Videobridge
          * {@link Endpoint}s of this conference.
          */
         public AtomicLong totalColibriWebSocketMessagesSent = new AtomicLong();
+
+        /**
+         * The total number of bytes received in RTP packets in conferences on
+         * this videobridge. Note that this is only updated when conferences
+         * expire.
+         */
+        public AtomicLong totalBytesReceived = new AtomicLong();
+
+        /**
+         * The total number of bytes sent in RTP packets in conferences on
+         * this videobridge. Note that this is only updated when conferences
+         * expire.
+         */
+        public AtomicLong totalBytesSent = new AtomicLong();
+
+        /**
+         * The total number of RTP packets received in conferences on this
+         * videobridge. Note that this is only updated when conferences
+         * expire.
+         */
+        public AtomicLong totalPacketsReceived = new AtomicLong();
+
+        /**
+         * The total number of RTP packets sent in conferences on this
+         * videobridge. Note that this is only updated when conferences
+         * expire.
+         */
+        public AtomicLong totalPacketsSent = new AtomicLong();
+
+        /**
+         * The total number of bytes received in Octo packets in conferences on
+         * this videobridge. Note that this is only updated when conferences
+         * expire.
+         */
+        public AtomicLong totalBytesReceivedOcto = new AtomicLong();
+
+        /**
+         * The total number of bytes sent in Octo packets in conferences on
+         * this videobridge. Note that this is only updated when conferences
+         * expire.
+         */
+        public AtomicLong totalBytesSentOcto = new AtomicLong();
+
+        /**
+         * The total number of Octo packets received in conferences on this
+         * videobridge. Note that this is only updated when conferences expire.
+         */
+        public AtomicLong totalPacketsReceivedOcto = new AtomicLong();
+
+        /**
+         * The total number of Octo packets sent in conferences on this
+         * videobridge. Note that this is only updated when conferences expire.
+         */
+        public AtomicLong totalPacketsSentOcto = new AtomicLong();
     }
 }
