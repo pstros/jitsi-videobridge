@@ -16,11 +16,13 @@
 package org.jitsi.videobridge.cc.vp8;
 
 import org.jetbrains.annotations.*;
-import org.jitsi.impl.neomedia.codec.video.vp8.*;
-import org.jitsi.impl.neomedia.rtp.*;
-import org.jitsi.service.neomedia.*;
-import org.jitsi.util.*;
-import org.jitsi.videobridge.cc.*;
+import org.jitsi.nlj.rtp.*;
+import org.jitsi.nlj.rtp.codec.vp8.*;
+import org.jitsi.nlj.util.*;
+import org.jitsi.rtp.util.*;
+import org.jitsi.utils.logging.*;
+import org.jitsi.utils.logging2.Logger;
+import org.jitsi_modified.impl.neomedia.codec.video.vp8.*;
 
 import java.util.*;
 
@@ -38,8 +40,28 @@ public class VP8FrameProjection
      * The {@link Logger} to be used by this instance to print debug
      * information.
      */
-    private static final Logger
-        logger = Logger.getLogger(VP8FrameProjection.class);
+    private final Logger logger;
+
+    /**
+     * The parent logger, so we can pass it to new instances of {@link VP8FrameProjection}
+     */
+    private final Logger parentLogger;
+
+    /**
+     * The time series logger for this instance.
+     */
+    private static final TimeSeriesLogger timeSeriesLogger
+        = TimeSeriesLogger.getTimeSeriesLogger(VP8FrameProjection.class);
+
+    /**
+     * An empty packet array.
+     */
+    private static final Vp8Packet[] EMPTY_PACKET_ARR = new Vp8Packet[0];
+
+    /**
+     * The diagnostic context for this instance.
+     */
+    private final DiagnosticContext diagnosticContext;
 
     /**
      * The time (in millis) to wait before considering that this frame is fully
@@ -95,10 +117,19 @@ public class VP8FrameProjection
      * Ctor.
      *
      * @param ssrc the SSRC of the destination VP8 picture.
+     * @param timestamp The RTP timestamp of the projected frame that this
+     * instance refers to (RFC3550).
+     * @param startingSequenceNumber The starting RTP sequence number of the
+     * projected frame that this instance refers to (RFC3550).
      */
-    VP8FrameProjection(long ssrc)
+    VP8FrameProjection(
+        @NotNull DiagnosticContext diagnosticContext,
+        @NotNull Logger parentLogger,
+        long ssrc, int startingSequenceNumber, long timestamp)
     {
-        this(null, ssrc, 0, 0, 0, 0, 0);
+        this(diagnosticContext, parentLogger, null /* vp8Frame */, ssrc, timestamp,
+            startingSequenceNumber, 0 /* extendedPictureId */,
+            0 /* tl0PICIDX */, 0 /* createdMs */);
     }
 
     /**
@@ -117,10 +148,15 @@ public class VP8FrameProjection
      * instance refers to (RFC7741).
      */
     private VP8FrameProjection(
+        @NotNull DiagnosticContext diagnosticContext,
+        @NotNull Logger parentLogger,
         VP8Frame vp8Frame,
         long ssrc, long timestamp, int startingSequenceNumber,
         int extendedPictureId, int tl0PICIDX, long createdMs)
     {
+        this.diagnosticContext = diagnosticContext;
+        this.parentLogger = parentLogger;
+        this.logger = parentLogger.createChildLogger(VP8FrameProjection.class.getName());
         this.ssrc = ssrc;
         this.timestamp = timestamp;
         this.startingSequenceNumber = startingSequenceNumber;
@@ -144,7 +180,7 @@ public class VP8FrameProjection
      * an argument is decodable.
      */
     VP8FrameProjection makeNext(
-        @NotNull RawPacket firstPacketOfFrame,
+        @NotNull VideoRtpPacket firstPacketOfFrame,
         int maxSequenceNumberSeenBeforeFirstPacket,
         long nowMs)
     {
@@ -162,8 +198,9 @@ public class VP8FrameProjection
             // without having sent a keyframe first.
             if (nextVP8Frame.isKeyframe())
             {
-                isLast = false;
-                return new VP8FrameProjection(nextVP8Frame, ssrc, timestamp,
+                close();
+                return new VP8FrameProjection(diagnosticContext, parentLogger,
+                    nextVP8Frame, ssrc, timestamp,
                     startingSequenceNumber, extendedPictureId, tl0PICIDX,
                     nowMs);
             }
@@ -183,14 +220,11 @@ public class VP8FrameProjection
             // We synchronize on the VP8 frame because the max sequence number
             // can be updated from other threads and the isLast field can be
             // read by other threads.
-            synchronized (vp8Frame)
-            {
-                isLast = false;
-                return new VP8FrameProjection(
-                    nextVP8Frame, ssrc, nextTimestamp(nextVP8Frame, nowMs),
-                    nextStartingSequenceNumber(), nextExtendedPictureId(),
-                    nextTL0PICIDX(nextVP8Frame), nowMs);
-            }
+            close();
+            return new VP8FrameProjection(diagnosticContext, parentLogger,
+                nextVP8Frame, ssrc, nextTimestamp(nextVP8Frame, nowMs),
+                nextStartingSequenceNumber(), nextExtendedPictureId(),
+                nextTL0PICIDX(nextVP8Frame), nowMs);
         }
     }
 
@@ -234,12 +268,11 @@ public class VP8FrameProjection
         else
         {
             // compute and apply a delta
-            delta = RTPUtils.rtpTimestampDiff(
+            delta = RtpUtils.getTimestampDiff(
                 nextVP8Frame.getTimestamp(), vp8Frame.getTimestamp());
         }
 
-        long nextTimestamp = timestamp + delta;
-        return nextTimestamp & RawPacket.TIMESTAMP_MASK;
+        return RtpUtils.applyTimestampDelta(timestamp, delta);
     }
 
     /**
@@ -252,14 +285,33 @@ public class VP8FrameProjection
      */
     private int nextStartingSequenceNumber()
     {
-        int vp8FrameLength = RTPUtils.getSequenceNumberDelta(
-            vp8Frame.getMaxSequenceNumber(),
-            vp8Frame.getStartingSequenceNumber());
+        return RtpUtils.applySequenceNumberDelta(maxSequenceNumber(), 1);
+    }
 
-        int nextStartingSequenceNumber
-            = startingSequenceNumber + vp8FrameLength + 1;
+    /**
+     * Small utility method that computes and returns the max sequence number of
+     * this frame.
+     *
+     * @return the max sequence number of this frame.
+     */
+    int maxSequenceNumber()
+    {
+        // assert !isLast; otherwise the maxSequenceNumber is not guaranteed to
+        // not change. So, prior to calling this method the caller needs to have
+        // called the close method.
+        if (vp8Frame != null)
+        {
+            int vp8FrameLength
+                    = RtpUtils.getSequenceNumberDelta(
+                        vp8Frame.getMaxSequenceNumber(),
+                        vp8Frame.getStartingSequenceNumber());
 
-        return nextStartingSequenceNumber & RawPacket.SEQUENCE_NUMBER_MASK;
+            return RtpUtils.applySequenceNumberDelta(startingSequenceNumber, vp8FrameLength);
+        }
+        else
+        {
+            return RtpUtils.applySequenceNumberDelta(startingSequenceNumber, -1);
+        }
     }
 
     /**
@@ -284,7 +336,7 @@ public class VP8FrameProjection
      * @param cache the cache to pull piggy-backed packets from.
      * @param rtpPacket the RTP packet to project.
      */
-    RawPacket[] rewriteRtp(@NotNull RawPacket rtpPacket, RawPacketCache cache)
+    Vp8Packet[] rewriteRtp(@NotNull Vp8Packet rtpPacket, PacketCache cache)
     {
         int originalSequenceNumber = rtpPacket.getSequenceNumber();
 
@@ -297,30 +349,29 @@ public class VP8FrameProjection
             || originalSequenceNumber != vp8Frame.getStartingSequenceNumber()
             || cache == null)
         {
-            return AdaptiveTrackProjection.EMPTY_PACKET_ARR;
+            return EMPTY_PACKET_ARR;
         }
 
         // We piggy-back any re-ordered packets of this frame.
         long vp8FrameSSRC = vp8Frame.getSSRCAsLong();
 
-        List<RawPacket> piggyBackedPackets = new ArrayList<>();
-        int len = RTPUtils.getSequenceNumberDelta(
+        List<Vp8Packet> piggyBackedPackets = new ArrayList<>();
+        int len = RtpUtils.getSequenceNumberDelta(
             piggyBackUntilSequenceNumber, originalSequenceNumber) + 1;
 
-        if (logger.isDebugEnabled())
-        {
-            logger.debug("Piggybacking " + len + " missed packets from "
-                + originalSequenceNumber
-                + " until " + piggyBackUntilSequenceNumber);
-        }
+        logger.debug(() -> "Piggybacking " + len + " missed packets from "
+            + originalSequenceNumber
+            + " until " + piggyBackUntilSequenceNumber);
 
         for (int i = 0; i < len; i++)
         {
             int piggyBackedPacketSequenceNumber
-                = (originalSequenceNumber + i) & RawPacket.SEQUENCE_NUMBER_MASK;
+                = RtpUtils.applySequenceNumberDelta(originalSequenceNumber, i);
 
-            RawPacket lastPacket = cache.get(
-                vp8FrameSSRC, piggyBackedPacketSequenceNumber);
+            ArrayCache.Container container
+                    = cache.get(vp8FrameSSRC, piggyBackedPacketSequenceNumber);
+            Vp8Packet lastPacket
+                    = container == null ? null : (Vp8Packet) container.getItem();
 
             // the call to accept (synchronized) may update the
             // maxSequenceNumber.
@@ -331,7 +382,7 @@ public class VP8FrameProjection
             // packet of a frame, the first packet of another frame may have
             // already been accepted, which means there's no longer space to
             // piggyback anything.
-            if (accept(lastPacket))
+            if (lastPacket != null && accept(lastPacket))
             {
                 piggyBackedPackets.add(lastPacket);
             }
@@ -339,17 +390,18 @@ public class VP8FrameProjection
 
         if (piggyBackedPackets.size() > 0)
         {
-            for (RawPacket pktOut : piggyBackedPackets)
+            logger.debug(() -> "Sending " + piggyBackedPackets.size()
+                    + " piggybacked packets");
+            for (Vp8Packet pktOut : piggyBackedPackets)
             {
                 rewriteRtpInternal(pktOut);
             }
 
-            return piggyBackedPackets.toArray(
-                new RawPacket[piggyBackedPackets.size()]);
+            return piggyBackedPackets.toArray(new Vp8Packet[0]);
         }
         else
         {
-            return AdaptiveTrackProjection.EMPTY_PACKET_ARR;
+            return EMPTY_PACKET_ARR;
         }
     }
 
@@ -358,33 +410,33 @@ public class VP8FrameProjection
      *
      * @param pkt the RTP packet to rewrite.
      */
-    private void rewriteRtpInternal(@NotNull RawPacket pkt)
+    private void rewriteRtpInternal(@NotNull Vp8Packet pkt)
     {
         // update ssrc, sequence number, timestamp, pictureId and tl0picidx
-        pkt.setSSRC((int) ssrc);
+        pkt.setSsrc(ssrc);
         pkt.setTimestamp(timestamp);
 
-        int sequenceNumberDelta = RTPUtils.getSequenceNumberDelta(
-            pkt.getSequenceNumber(), vp8Frame.getStartingSequenceNumber());
+        int sequenceNumberDelta
+                = RtpUtils.getSequenceNumberDelta(
+                    pkt.getSequenceNumber(),
+                    vp8Frame.getStartingSequenceNumber());
 
-        int sequenceNumber = RTPUtils.applySequenceNumberDelta(
-            startingSequenceNumber, sequenceNumberDelta);
+        int sequenceNumber
+            = RtpUtils.applySequenceNumberDelta(startingSequenceNumber, sequenceNumberDelta);
         pkt.setSequenceNumber(sequenceNumber);
 
-        byte[] buf = pkt.getBuffer();
-        int payloadOff = pkt.getPayloadOffset()
-            , payloadLen = pkt.getPayloadLength();
+        pkt.setTL0PICIDX(tl0PICIDX);
+        pkt.setPictureId(extendedPictureId);
 
-        if (!DePacketizer.VP8PayloadDescriptor.setTL0PICIDX(
-            buf, payloadOff, payloadLen, tl0PICIDX))
+        if (timeSeriesLogger.isTraceEnabled())
         {
-            logger.warn("Failed to set the TL0PICIDX of a VP8 packet.");
-        }
-
-        if (!DePacketizer.VP8PayloadDescriptor.setExtendedPictureId(
-            buf, payloadOff, payloadLen, extendedPictureId))
-        {
-            logger.warn("Failed to set the picture id of a VP8 packet.");
+            timeSeriesLogger.trace(diagnosticContext
+                    .makeTimeSeriesPoint("rtp_vp8_rewrite")
+                    .addField("rtp.ssrc", ssrc)
+                    .addField("rtp.timestamp", timestamp)
+                    .addField("rtp.seq", sequenceNumber)
+                    .addField("vp8.pictureid", extendedPictureId)
+                    .addField("vp8.tl0picidx", tl0PICIDX));
         }
     }
 
@@ -394,11 +446,11 @@ public class VP8FrameProjection
      * of the incoming packet and whether or not the {@link VP8FrameProjection}
      * instance is the "last" {@link VP8FrameProjection} or not.
      *
-     * @param rtpPacket the {@link RawPacket} that will be examined .
+     * @param rtpPacket the {@link VideoRtpPacket} that will be examined .
      * @return true if the packet can be forwarded as part of this
      * {@link VP8FrameProjection}, false otherwise.
      */
-    public boolean accept(@NotNull RawPacket rtpPacket)
+    public boolean accept(@NotNull VideoRtpPacket rtpPacket)
     {
         if (vp8Frame == null || !vp8Frame.matchesFrame(rtpPacket))
         {
@@ -409,8 +461,10 @@ public class VP8FrameProjection
         synchronized (vp8Frame)
         {
             int sequenceNumber = rtpPacket.getSequenceNumber();
-            int deltaFromMax = RTPUtils.getSequenceNumberDelta(
-                vp8Frame.getMaxSequenceNumber(), sequenceNumber);
+            int deltaFromMax
+                = RtpUtils.getSequenceNumberDelta(
+                        vp8Frame.getMaxSequenceNumber(),
+                        sequenceNumber);
 
             boolean isGreaterThanMax
                 = vp8Frame.getMaxSequenceNumber() == -1 || deltaFromMax < 0;
@@ -420,7 +474,7 @@ public class VP8FrameProjection
                 if (isGreaterThanMax)
                 {
                     vp8Frame.setMaxSequenceNumber(
-                        sequenceNumber, rtpPacket.isPacketMarked());
+                        sequenceNumber, rtpPacket.isMarked());
                 }
 
                 return true;
@@ -483,11 +537,20 @@ public class VP8FrameProjection
     }
 
     /**
-     * @return true if this is the "last" accepted {@link VP8Frame} instance,
-     * false otherwise.
+     * Prevents the max sequence number of this frame to grow any further.
      */
-    boolean isLast()
+    public void close()
     {
-        return isLast;
+        if (vp8Frame != null)
+        {
+            synchronized (vp8Frame)
+            {
+                isLast = false;
+            }
+        }
+        else
+        {
+            isLast = false;
+        }
     }
 }

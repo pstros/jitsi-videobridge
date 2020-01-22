@@ -1,5 +1,5 @@
 /*
- * Copyright @ 2018 Atlassian Pty Ltd
+ * Copyright @ 2018 - Present, 8x8 Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@ package org.jitsi.videobridge.rest;
 import org.eclipse.jetty.server.*;
 import org.eclipse.jetty.server.handler.*;
 import org.jitsi.rest.*;
-import org.jitsi.util.*;
+import org.jitsi.utils.logging2.*;
 import org.osgi.framework.*;
 
 import javax.servlet.*;
@@ -39,8 +39,7 @@ public class PublicClearPortRedirectBundleActivator
      * The logger instance used by this
      * {@link PublicClearPortRedirectBundleActivator}.
      */
-    private static final Logger logger
-        = Logger.getLogger(PublicClearPortRedirectBundleActivator.class);
+    private static final Logger logger = new LoggerImpl(PublicClearPortRedirectBundleActivator.class.getName());
 
     /**
      * The prefix of the property names for the Jetty instance managed by
@@ -144,6 +143,9 @@ public class PublicClearPortRedirectBundleActivator
          */
         private final int targetPort;
 
+        /**
+         * Initializes a new {@link RedirectHandler} for a specific port.
+         */
         RedirectHandler(int targetPort)
         {
             this.targetPort = targetPort;

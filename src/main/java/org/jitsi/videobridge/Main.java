@@ -1,5 +1,5 @@
 /*
- * Copyright @ 2015 Atlassian Pty Ltd
+ * Copyright @ 2015 - Present, 8x8 Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,9 +17,13 @@ package org.jitsi.videobridge;
 
 import org.jitsi.cmd.*;
 import org.jitsi.meet.*;
-import org.jitsi.service.neomedia.*;
+import org.jitsi.utils.config.validation.*;
 import org.jitsi.videobridge.osgi.*;
+import org.jitsi.videobridge.util.config.*;
 import org.jitsi.videobridge.xmpp.*;
+
+import java.util.*;
+import java.util.stream.*;
 
 /**
  * Provides the <tt>main</tt> entry point of the Jitsi Videobridge application
@@ -64,36 +68,6 @@ public class Main
     private static final String HOST_ARG_VALUE = "localhost";
 
     /**
-     * The name of the command-line argument which specifies the value of the
-     * maximum port to use for dynamic allocation.
-     * @deprecated We should replace this with a property.
-     */
-    private static final String MAX_PORT_ARG_NAME = "--max-port";
-
-    /**
-     * The default value of the {@link #MAX_PORT_ARG_NAME} command-line argument
-     * if it is not explicitly provided.
-     * @deprecated We should replace this with a property.
-     */
-    private static final int MAX_PORT_ARG_VALUE
-        = TransportManager.DEFAULT_MAX_PORT;
-
-    /**
-     * The name of the command-line argument which specifies the value of the
-     * minimum port to use for dynamic allocation.
-     * @deprecated We should replace this with a property.
-     */
-    private static final String MIN_PORT_ARG_NAME = "--min-port";
-
-    /**
-     * The default value of the {@link #MIN_PORT_ARG_NAME} command-line argument
-     * if it is not explicitly provided.
-     * @deprecated We should replace this with a property.
-     */
-    private static final int MIN_PORT_ARG_VALUE
-        = TransportManager.DEFAULT_MIN_PORT;
-
-    /**
      * The name of the command-line argument which specifies the port of the
      * XMPP host to connect on.
      */
@@ -129,6 +103,7 @@ public class Main
     public static void main(String[] args)
         throws Exception
     {
+        validateConfig();
         CmdLine cmdLine = new CmdLine();
 
         cmdLine.parse(args);
@@ -137,10 +112,6 @@ public class Main
         String apis
             = cmdLine.getOptionValue(APIS_ARG_NAME, Videobridge.XMPP_API);
         String domain = cmdLine.getOptionValue(DOMAIN_ARG_NAME, null);
-        int maxPort
-            = cmdLine.getIntOptionValue(MAX_PORT_ARG_NAME, MAX_PORT_ARG_VALUE);
-        int minPort
-            = cmdLine.getIntOptionValue(MIN_PORT_ARG_NAME, MIN_PORT_ARG_VALUE);
         int port = cmdLine.getIntOptionValue(PORT_ARG_NAME, PORT_ARG_VALUE);
         String secret = cmdLine.getOptionValue(SECRET_ARG_NAME, "");
         String subdomain
@@ -152,6 +123,14 @@ public class Main
                     HOST_ARG_NAME,
                     domain == null ? HOST_ARG_VALUE : domain);
 
+        // Some of our dependencies bring in slf4j, which means Jetty will default to using
+        // slf4j as its logging backend.  The version of slf4j brought in, however, is too old
+        // for Jetty so it throws errors.  We use java.util.logging so tell Jetty to use that
+        // as its logging backend.
+        //TODO: Instead of setting this here, we should integrate it with the infra/debian scripts
+        // to be passed.
+        System.setProperty("org.eclipse.jetty.util.log.class", "org.eclipse.jetty.util.log.JavaUtilLog");
+
         // Before initializing the application programming interfaces (APIs) of
         // Jitsi Videobridge, set any System properties which they use and which
         // may be specified by the command-line arguments.
@@ -162,29 +141,8 @@ public class Main
                 Videobridge.XMPP_API_PNAME,
                 Boolean.toString(apis.contains(Videobridge.XMPP_API)));
 
-        // Max and min port properties
-        String maxPort_ = String.valueOf(maxPort);
-        String minPort_ = String.valueOf(minPort);
-
-        // Jingle Raw UDP transport
-        // TODO: Use the common TransportManager.portTracker for Raw UDP too
-        System.setProperty(
-                DefaultStreamConnector.MAX_PORT_NUMBER_PROPERTY_NAME,
-                maxPort_);
-        System.setProperty(
-                DefaultStreamConnector.MIN_PORT_NUMBER_PROPERTY_NAME,
-                minPort_);
-
-        // enable h264 format registering in libjitsi
-        System.setProperty(
-                MediaService.ENABLE_H264_FORMAT_PNAME,
-                "true");
-
-        // Jingle ICE-UDP transport
-        TransportManager.portTracker.tryRange(minPort_, maxPort_);
-
         ComponentMain main = new ComponentMain();
-        JvbBundleConfig osgiBundles = new JvbBundleConfig();
+        BundleConfig osgiBundles = new BundleConfig();
 
         // Start Jitsi Videobridge as an external Jabber component.
         if (apis.contains(Videobridge.XMPP_API))
@@ -203,5 +161,15 @@ public class Main
         {
             main.runMainProgramLoop(osgiBundles);
         }
+    }
+
+    protected static void validateConfig()
+    {
+        ConfigValidator configValidator = new ConfigValidator("org.jitsi");
+        //TODO: pass command-line args as well
+        Set<String> configPropNames = JvbConfig.getConfig().withOnlyPath("videobridge").entrySet().stream()
+            .map(Map.Entry::getKey)
+            .collect(Collectors.toSet());
+        configValidator.validate(configPropNames);
     }
 }

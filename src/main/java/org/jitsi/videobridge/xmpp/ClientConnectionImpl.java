@@ -1,5 +1,5 @@
 /*
- * Copyright @ 2018 Atlassian Pty Ltd
+ * Copyright @ 2018 - Present, 8x8 Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,11 +15,10 @@
  */
 package org.jitsi.videobridge.xmpp;
 
-import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
-import net.java.sip.communicator.impl.protocol.jabber.extensions.health.*;
-import net.java.sip.communicator.util.*;
 import org.jitsi.osgi.*;
 import org.jitsi.service.configuration.*;
+import org.jitsi.xmpp.extensions.colibri.*;
+import org.jitsi.xmpp.extensions.health.*;
 import org.jitsi.xmpp.mucclient.*;
 import org.jivesoftware.smack.packet.*;
 import org.json.simple.*;
@@ -39,8 +38,8 @@ public class ClientConnectionImpl
      * The {@link Logger} used by the {@link ClientConnectionImpl}
      * class and its instances for logging output.
      */
-    private static final org.jitsi.util.Logger logger
-        =  org.jitsi.util.Logger.getLogger(ClientConnectionImpl.class);
+    private static final org.jitsi.utils.logging.Logger logger
+        =  org.jitsi.utils.logging.Logger.getLogger(ClientConnectionImpl.class);
 
     /**
      * The prefix of the property names used to configure this bundle.
@@ -66,7 +65,7 @@ public class ClientConnectionImpl
     public void start(BundleContext bundleContext)
     {
         ConfigurationService config
-            = ServiceUtils.getService(
+            = ServiceUtils2.getService(
                 bundleContext, ConfigurationService.class);
         if (config == null)
         {
@@ -233,9 +232,10 @@ public class ClientConnectionImpl
      * }
      * }</pre>
      *
-     * @return {@code false} if this instance has not been initialized, or the
-     * JSON is not in the expected format. Otherwise (regardless of whether
-     * a client with the specified ID existed or not), returns {@code true}.
+     * @return {@code true} if the MUC client with the specified ID was removed.
+     * Otherwise (if instance has not been initialized, if the JSON is not in
+     * the expected format, or if no MUC client with the specified ID exists),
+     * returns {@code false}.
      */
     public boolean removeMucClient(JSONObject jsonObject)
     {
@@ -245,7 +245,6 @@ public class ClientConnectionImpl
             return false;
         }
 
-        mucClientManager.removeMucClient((String) jsonObject.get("id"));
-        return true;
+        return mucClientManager.removeMucClient((String) jsonObject.get("id"));
     }
 }

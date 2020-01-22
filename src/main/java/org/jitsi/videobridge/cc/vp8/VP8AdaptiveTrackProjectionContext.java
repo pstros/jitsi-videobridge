@@ -15,14 +15,19 @@
  */
 package org.jitsi.videobridge.cc.vp8;
 
-import net.sf.fmj.media.rtp.*;
 import org.jetbrains.annotations.*;
-import org.jitsi.impl.neomedia.codec.video.vp8.*;
-import org.jitsi.impl.neomedia.rtcp.*;
-import org.jitsi.impl.neomedia.rtp.*;
-import org.jitsi.service.neomedia.*;
-import org.jitsi.util.*;
+import org.jitsi.nlj.format.*;
+import org.jitsi.nlj.rtp.*;
+import org.jitsi.nlj.rtp.codec.vp8.*;
+import org.jitsi.nlj.util.*;
+import org.jitsi.rtp.rtcp.*;
+import org.jitsi.rtp.util.*;
+import org.jitsi.utils.*;
+import org.jitsi.utils.logging.*;
+import org.jitsi.utils.logging2.Logger;
 import org.jitsi.videobridge.cc.*;
+import org.jitsi_modified.impl.neomedia.codec.video.vp8.*;
+import org.json.simple.*;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -37,6 +42,14 @@ import java.util.concurrent.*;
 public class VP8AdaptiveTrackProjectionContext
     implements AdaptiveTrackProjectionContext
 {
+    private final Logger logger;
+
+    /**
+     * The time (in clock rate samples) to wait before discarding a
+     * non-fully-projected frame (see {@link #cleanupFrameProjectionMap}).
+     */
+    private final long WAIT_SAMPLES = 45000;
+
     /**
      * A map of partially transmitted {@link VP8FrameProjection}s, i.e.
      * projections of VP8 frames for which we haven't transmitted all their
@@ -52,11 +65,14 @@ public class VP8AdaptiveTrackProjectionContext
      * Recovered packets of fully transmitted frames (this can happen for
      * example when the sending endpoint probes for bandwidth with duplicate
      * packets over the RTX stream) are dropped as they're not needed anymore.
-     *
-     * TODO fine tune the ConcurrentHashMap instance to improve performance.
      */
-    private final Map<Long, VP8FrameProjection>
-        vp8FrameProjectionMap = new ConcurrentHashMap<>();
+    private final SortedMap<Long, VP8FrameProjection>
+        vp8FrameProjectionMap = new ConcurrentSkipListMap<>(
+            /* This is only a valid Comparitor if timestamp diffs of all
+             * timestamps are within half the number space.  (This property is
+             * assured by #cleanupFrameProjectionMap.)
+             */
+            (t1, t2) -> (int)RtpUtils.getTimestampDiff(t1, t2));
 
     /**
      * A map that stores the maximum sequence number of frames that are not
@@ -70,7 +86,12 @@ public class VP8AdaptiveTrackProjectionContext
      * The {@link VP8QualityFilter} instance that does quality filtering on the
      * incoming frames.
      */
-    private final VP8QualityFilter vp8QualityFilter = new VP8QualityFilter();
+    private final VP8QualityFilter vp8QualityFilter;
+
+    /**
+     * The diagnostic context of this instance.
+     */
+    private final DiagnosticContext diagnosticContext;
 
     /**
      * The "last" {@link VP8FrameProjection} that this instance has accepted.
@@ -80,30 +101,40 @@ public class VP8AdaptiveTrackProjectionContext
     private VP8FrameProjection lastVP8FrameProjection;
 
     /**
-     *
+     * The VP8 media format. No essential functionality relies on this field,
+     * it's only used as a cache of the {@link PayloadType} instance for VP8 in
+     * case we have to do a context switch (see {@link AdaptiveTrackProjection}),
+     * in order to avoid having to resolve the format.
      */
-    private final Object transmittedSyncRoot = new Object();
-
-    /**
-     * Keeps track of the number of transmitted bytes. This is used in RTCP SR
-     * rewriting.
-     */
-    private long transmittedBytes = 0;
-
-    /**
-     * Keeps track of the number of transmitted packets. This is used in RTCP SR
-     * rewriting.
-     */
-    private long transmittedPackets = 0;
+    private final PayloadType payloadType;
 
     /**
      * Ctor.
      *
-     * @param ssrc the SSRC of the projection.
+     * @param payloadType the VP8 media format.
+     * @param rtpState the RTP state to begin with.
      */
-    public VP8AdaptiveTrackProjectionContext(long ssrc)
+    public VP8AdaptiveTrackProjectionContext(
+            @NotNull DiagnosticContext diagnosticContext,
+            @NotNull PayloadType payloadType,
+            @NotNull RtpState rtpState,
+            @NotNull Logger parentLogger)
     {
-        lastVP8FrameProjection = new VP8FrameProjection(ssrc);
+        this.diagnosticContext = diagnosticContext;
+        this.logger = parentLogger.createChildLogger(VP8AdaptiveTrackProjectionContext.class.getName());
+        this.payloadType = payloadType;
+        this.vp8QualityFilter = new VP8QualityFilter(parentLogger);
+
+        // Compute the starting sequence number and the timestamp of the initial
+        // frame based on the RTP state.
+        int startingSequenceNumber =
+                RtpUtils.applySequenceNumberDelta(rtpState.maxSequenceNumber, 1);
+
+        long timestamp =
+                RtpUtils.applyTimestampDelta(rtpState.maxTimestamp, 3000);
+
+        lastVP8FrameProjection = new VP8FrameProjection(diagnosticContext, logger,
+            rtpState.ssrc, startingSequenceNumber, timestamp);
     }
 
     /**
@@ -114,7 +145,7 @@ public class VP8AdaptiveTrackProjectionContext
      * @return an existing VP8 frame projection or null.
      */
     private VP8FrameProjection
-    lookupVP8FrameProjection(@NotNull RawPacket rtpPacket)
+    lookupVP8FrameProjection(@NotNull VideoRtpPacket rtpPacket)
     {
         // Lookup for an existing VP8 frame doesn't need to be synced because
         // we're using a ConcurrentHashMap. At the time of this writing, two
@@ -158,6 +189,51 @@ public class VP8AdaptiveTrackProjectionContext
         return null;
     }
 
+    /** Clean up old entries in the frame projection map.
+     *
+     * The frame projection map is maintained as a sorted map; to clean it up,
+     * we walk entries from the oldest (in timestamp ordering), removing anything
+     * more than #WAIT_SAMPLES older than the newest timestamp.
+     *
+     * Because the map is ordered, we can stop searching entries when we reach
+     * one that is new enough not to be removed, so this is amortized constant
+     * time per frame.
+     *
+     * Caller should be synchronized.
+     * */
+    private void cleanupFrameProjectionMap(long newTimestamp)
+    {
+        if (vp8FrameProjectionMap.isEmpty())
+        {
+            return;
+        }
+
+        long newestTimestamp = vp8FrameProjectionMap.lastKey();
+
+        /* If our timestamps have jumped by a quarter of the number space, reset the map. */
+        long timestampJump = RtpUtils.getTimestampDiff(newTimestamp, newestTimestamp);
+        if (timestampJump >= 0x4000_0000 || timestampJump <= -0x4000_0000)
+        {
+            vp8FrameProjectionMap.clear();
+            return;
+        }
+
+        long threshold = RtpUtils.applyTimestampDelta(newTimestamp, -WAIT_SAMPLES);
+
+        Iterator<Long> it = vp8FrameProjectionMap.keySet().iterator();
+        while (it.hasNext())
+        {
+            Long key = it.next();
+            if (RtpUtils.isOlderTimestampThan(key, threshold))
+            {
+                it.remove();
+            }
+            else {
+                break;
+            }
+        }
+    }
+
     /**
      * Defines a packet filter that determines which packets to project in order
      * to produce an RTP stream that can be correctly be decoded at the receiver
@@ -168,12 +244,13 @@ public class VP8AdaptiveTrackProjectionContext
      * method at a time.
      *
      * @param rtpPacket the VP8 packet to decide whether or not to project.
-     * @param targetIndex
+     * @param incomingIndex the quality index of the incoming RTP packet
+     * @param targetIndex the target quality index we want to achieve
      * @return true to project the packet, otherwise false.
      */
     private synchronized
     VP8FrameProjection createVP8FrameProjection(
-        @NotNull RawPacket rtpPacket, int targetIndex)
+        @NotNull VideoRtpPacket rtpPacket, int incomingIndex, int targetIndex)
     {
         // Creating a new VP8 projection depends on reading and results in
         // writing of the last VP8 frame, therefore this method needs to be
@@ -202,7 +279,7 @@ public class VP8AdaptiveTrackProjectionContext
         if (!DePacketizer.VP8PayloadDescriptor.isStartOfFrame(buf, payloadOff))
         {
             maybeUpdateMaxSequenceNumberOfFrame(
-                rtpPacket.getSSRCAsLong(),
+                rtpPacket.getSsrc(),
                 rtpPacket.getTimestamp(),
                 rtpPacket.getSequenceNumber());
             return null;
@@ -213,7 +290,8 @@ public class VP8AdaptiveTrackProjectionContext
         // Lastly, check whether the quality of the frame is something that we
         // want to forward. We don't want to be allocating new objects unless
         // we're interested in the quality of this frame.
-        if (!vp8QualityFilter.acceptFrame(rtpPacket, targetIndex, nowMs))
+        if (!vp8QualityFilter.acceptFrame(
+            rtpPacket, incomingIndex, targetIndex, nowMs))
         {
             return null;
         }
@@ -222,7 +300,7 @@ public class VP8AdaptiveTrackProjectionContext
         // going to produce a decodable VP8 packet stream.
         int maxSequenceNumberSeenBeforeFirstPacket
             = getMaxSequenceNumberOfFrame(
-                rtpPacket.getSSRCAsLong(), rtpPacket.getTimestamp());
+                rtpPacket.getSsrc(), rtpPacket.getTimestamp());
 
         VP8FrameProjection nextVP8FrameProjection = lastVP8FrameProjection
             .makeNext(rtpPacket, maxSequenceNumberSeenBeforeFirstPacket, nowMs);
@@ -232,16 +310,25 @@ public class VP8AdaptiveTrackProjectionContext
             return null;
         }
 
+        if (lastVP8FrameProjection.getSSRC() != nextVP8FrameProjection.getSSRC())
+        {
+            /* We've changed the encoding we're forwarding, so previous frames
+             * in the map are no longer relevant.
+             */
+            vp8FrameProjectionMap.clear();
+        }
+        else
+        {
+            /* Remove projections of old frames from the map. */
+            cleanupFrameProjectionMap(rtpPacket.getTimestamp());
+        }
+
         // We have successfully projected the incoming frame and we've allocated
         // a starting sequence number for it. Any previous frames can no longer
         // grow.
         vp8FrameProjectionMap.put(rtpPacket.getTimestamp(), nextVP8FrameProjection);
         // The frame attached to the "last" projection is no longer the "last".
         lastVP8FrameProjection = nextVP8FrameProjection;
-
-        // Cleanup the frame projection map.
-        vp8FrameProjectionMap.entrySet().removeIf(
-            e -> e.getValue().isFullyProjected(nowMs));
 
         return nextVP8FrameProjection;
     }
@@ -295,7 +382,7 @@ public class VP8AdaptiveTrackProjectionContext
                 = getMaxSequenceNumberOfFrame(ssrc, timestamp);
 
             if (previousMaxSequenceNumber != -1
-                && RTPUtils.isOlderSequenceNumberThan(
+                && RtpUtils.isOlderSequenceNumberThan(
                     previousMaxSequenceNumber, sequenceNumber))
             {
                 frameToMaxSequenceNumberMap.put(timestamp, sequenceNumber);
@@ -315,29 +402,49 @@ public class VP8AdaptiveTrackProjectionContext
     {
         if (vp8QualityFilter.needsKeyframe())
         {
+            logger.debug(() -> "quality filter "
+                    + vp8QualityFilter.hashCode()
+                    + " says vp8 track needs keyframe");
+
             return true;
         }
 
         VP8Frame lastVP8Frame = lastVP8FrameProjection.getVP8Frame();
-        return lastVP8Frame == null || lastVP8Frame.needsKeyframe();
+        if (lastVP8Frame == null)
+        {
+            logger.debug(() -> " track projection last frame is null, needs keyframe");
+        }
+        else if (lastVP8Frame.needsKeyframe())
+        {
+            logger.debug(() -> " last vp8 frame says we need keyframe");
+        }
+        boolean result = lastVP8Frame == null || lastVP8Frame.needsKeyframe();
+        if (result)
+        {
+            logger.debug(() -> " vp8 track projection does need keyframe");
+        }
+        return result;
     }
 
     /**
      * Determines whether a packet should be accepted or not.
      *
      * @param rtpPacket the RTP packet to determine whether to project or not.
-     * @param targetIndex the target index to achieve
+     * @param incomingIndex the quality index of the incoming RTP packet
+     * @param targetIndex the target quality index we want to achieve
      * @return true if the packet should be accepted, false otherwise.
      */
     @Override
-    public boolean accept(@NotNull RawPacket rtpPacket, int targetIndex)
+    public boolean accept(
+        @NotNull VideoRtpPacket rtpPacket, int incomingIndex, int targetIndex)
     {
         VP8FrameProjection vp8FrameProjection
             = lookupVP8FrameProjection(rtpPacket);
 
         if (vp8FrameProjection == null)
         {
-            vp8FrameProjection = createVP8FrameProjection(rtpPacket, targetIndex);
+            vp8FrameProjection
+                = createVP8FrameProjection(rtpPacket, incomingIndex, targetIndex);
         }
 
         return vp8FrameProjection != null
@@ -347,76 +454,60 @@ public class VP8AdaptiveTrackProjectionContext
     /**
      * Rewrites the RTCP packet that is specified as an argument.
      *
-     * @param rtcpPacket the RTCP packet to transform.
+     * @param rtcpSrPacket the RTCP packet to transform.
      * @return true if the RTCP packet is accepted, false otherwise, in which
      * case it needs to be dropped.
      */
     @Override
-    public boolean rewriteRtcp(@NotNull RawPacket rtcpPacket)
+    public boolean rewriteRtcp(@NotNull RtcpSrPacket rtcpSrPacket)
     {
-        // Drop SRs from other streams.
-        boolean removed = false;
-        RTCPIterator it = new RTCPIterator(rtcpPacket);
-        while (it.hasNext())
+        VP8FrameProjection lastVP8FrameProjectionCopy = lastVP8FrameProjection;
+        if (lastVP8FrameProjectionCopy.getVP8Frame() == null
+            || rtcpSrPacket.getSenderSsrc() != lastVP8FrameProjectionCopy.getSSRC())
         {
-            ByteArrayBuffer baf = it.next();
-            switch (RTCPUtils.getPacketType(baf))
-            {
-            case RTCPPacket.SDES:
-                if (removed)
-                {
-                    it.remove();
-                }
-                break;
-            case RTCPPacket.SR:
-                VP8FrameProjection
-                    lastVP8FrameProjectionCopy = lastVP8FrameProjection;
-                if (lastVP8FrameProjectionCopy.getVP8Frame() == null
-                    || RawPacket.getRTCPSSRC(baf)
-                    != lastVP8FrameProjectionCopy.getSSRC())
-                {
-                    // SRs from other streams get axed.
-                    removed = true;
-                    it.remove();
-                }
-                else
-                {
-                    long srcTs = RTCPSenderInfoUtils.getTimestamp(baf);
-                    long delta = RTPUtils.rtpTimestampDiff(
-                        lastVP8FrameProjectionCopy.getTimestamp(),
-                        lastVP8FrameProjectionCopy.getVP8Frame().getTimestamp());
-
-                    long dstTs = RTPUtils.as32Bits(srcTs + delta);
-
-                    if (srcTs != dstTs)
-                    {
-                        RTCPSenderInfoUtils.setTimestamp(baf, (int) dstTs);
-                    }
-
-                    // Rewrite packet/octet count.
-                    synchronized (transmittedSyncRoot)
-                    {
-                        RTCPSenderInfoUtils
-                            .setOctetCount(baf, (int) transmittedBytes);
-                        RTCPSenderInfoUtils
-                            .setPacketCount(baf, (int) transmittedPackets);
-                    }
-                }
-                break;
-            case RTCPPacket.BYE:
-                // TODO rewrite SSRC.
-                break;
-            }
+            return false;
         }
 
-        return rtcpPacket.getLength() > 0;
+        long srcTs = rtcpSrPacket.getSenderInfo().getRtpTimestamp();
+        long delta = RtpUtils.getTimestampDiff(
+            lastVP8FrameProjectionCopy.getTimestamp(),
+            lastVP8FrameProjectionCopy.getVP8Frame().getTimestamp());
+
+        long dstTs = RtpUtils.applyTimestampDelta(srcTs, delta);
+
+        if (srcTs != dstTs)
+        {
+            rtcpSrPacket.getSenderInfo().setRtpTimestamp(dstTs);
+        }
+
+        return true;
+    }
+
+    @Override
+    public RtpState getRtpState()
+    {
+        synchronized (this)
+        {
+            lastVP8FrameProjection.close();
+        }
+
+        return new RtpState(
+            lastVP8FrameProjection.getSSRC(),
+            lastVP8FrameProjection.maxSequenceNumber(),
+            lastVP8FrameProjection.getTimestamp());
+    }
+
+    @Override
+    public PayloadType getPayloadType()
+    {
+        return payloadType;
     }
 
     /**
      * Rewrites the RTP packet that is specified as an argument.
      *
      * @param rtpPacket the RTP packet to rewrite.
-     * @param incomingRawPacketCache the packet cache to pull piggy-backed
+     * @param incomingPacketCache the packet cache to pull piggy-backed
      * packets from. Null is permissible, but in that case no packets will be
      * piggy backed.
      * @return any RTP packets to piggy-bac
@@ -424,10 +515,16 @@ public class VP8AdaptiveTrackProjectionContext
      * for the RTP packet that is specified as a parameter.
      */
     @Override
-    public RawPacket[] rewriteRtp(
-        @NotNull RawPacket rtpPacket, RawPacketCache incomingRawPacketCache)
+    public VideoRtpPacket[] rewriteRtp(
+        @NotNull VideoRtpPacket rtpPacket, PacketCache incomingPacketCache)
         throws RewriteException
     {
+        if (!(rtpPacket instanceof Vp8Packet))
+        {
+            logger.info("Got a non-VP8 packet.");
+            return null;
+        }
+
         VP8FrameProjection vp8FrameProjection
             = lookupVP8FrameProjection(rtpPacket);
         if (vp8FrameProjection == null)
@@ -436,24 +533,29 @@ public class VP8AdaptiveTrackProjectionContext
             throw new RewriteException();
         }
 
-        RawPacket[] ret
-            = vp8FrameProjection.rewriteRtp(rtpPacket, incomingRawPacketCache);
-
-        synchronized (transmittedSyncRoot)
-        {
-            transmittedBytes += rtpPacket.getLength();
-            transmittedPackets++;
-
-            if (!ArrayUtils.isNullOrEmpty(ret))
-            {
-                for (int i = 0; i < ret.length; i++)
-                {
-                    transmittedBytes += ret[i].getLength();
-                    transmittedPackets += 1;
-                }
-            }
-        }
+        Vp8Packet[] ret
+            = vp8FrameProjection.rewriteRtp((Vp8Packet) rtpPacket, incomingPacketCache);
 
         return ret;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public JSONObject getDebugState()
+    {
+        JSONObject debugState = new JSONObject();
+        debugState.put(
+                "class",
+                VP8AdaptiveTrackProjectionContext.class.getSimpleName());
+
+        debugState.put(
+                "vp8FrameProjectionMapSize",
+                vp8FrameProjectionMap.size());
+        debugState.put("vp8QualityFilter", vp8QualityFilter.getDebugState());
+        debugState.put("payloadType", payloadType.toString());
+
+        return debugState;
     }
 }

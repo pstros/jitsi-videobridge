@@ -1,5 +1,5 @@
 /*
- * Copyright @ 2015 Atlassian Pty Ltd
+ * Copyright @ 2015 - Present, 8x8 Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,9 +16,6 @@
 package org.jitsi.videobridge.xmpp;
 
 import java.util.*;
-
-import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
-import net.java.sip.communicator.util.*;
 
 import org.jitsi.meet.*;
 import org.jitsi.osgi.*;
@@ -50,8 +47,8 @@ public class ComponentImpl
      * The {@link Logger} used by the {@link ComponentImpl} class and its
      * instances for logging output.
      */
-    private static final org.jitsi.util.Logger logger
-            =  org.jitsi.util.Logger.getLogger(ComponentImpl.class);
+    private static final org.jitsi.utils.logging.Logger logger
+            =  org.jitsi.utils.logging.Logger.getLogger(ComponentImpl.class);
 
     /**
      * The (default) description of <tt>ComponentImpl</tt> instances.
@@ -195,11 +192,6 @@ public class ComponentImpl
     {
         try
         {
-            if (logger.isDebugEnabled())
-            {
-                logger.debug("RECV: " + iq.toXML());
-            }
-
             org.jivesoftware.smack.packet.IQ smackIQ = IQUtils.convert(iq);
             // Failed to convert to Smack IQ ?
             if (smackIQ == null)
@@ -233,11 +225,6 @@ public class ComponentImpl
             else
             {
                 resultIQ = IQUtils.convert(resultSmackIQ);
-
-                if (logger.isDebugEnabled())
-                {
-                    logger.debug("SENT: " + resultIQ.toXML());
-                }
             }
 
             return resultIQ;
@@ -438,7 +425,7 @@ public class ComponentImpl
         // Schedule ping task
         // note: the task if stopped automatically on component shutdown
         ConfigurationService config
-            = ServiceUtils.getService(
+            = ServiceUtils2.getService(
                     bundleContext, ConfigurationService.class);
 
         loadConfig(config, "org.jitsi.videobridge");

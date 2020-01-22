@@ -1,5 +1,5 @@
 /*
- * Copyright @ 2018 Atlassian Pty Ltd
+ * Copyright @ 2018 - Present, 8x8 Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,25 +15,21 @@
  */
 package org.jitsi.videobridge.octo;
 
-import org.jitsi.util.*;
+import org.jitsi.utils.logging2.*;
 import org.jitsi.videobridge.*;
 import org.json.simple.*;
 
-import java.util.*;
-
 /**
  * Extends {@link AbstractEndpointMessageTransport} for the purposes of Octo.
+ *
+ * Most {@code on*Event} methods are overriden as no-ops because they don't make
+ * sense for Octo and are never used. The single exception is
+ * {@link #onClientEndpointMessage(Object, JSONObject)} which is not overriden
+ * and the logic in the super class applies.
  */
-public class OctoEndpointMessageTransport
+class OctoEndpointMessageTransport
     extends AbstractEndpointMessageTransport
 {
-    /**
-     * The {@link Logger} used by the {@link RtpChannel} class and its instances
-     * to print debug information.
-     */
-    private static final Logger logger
-        = Logger.getLogger(OctoEndpointMessageTransport.class);
-
     /**
      * The associated {@link OctoEndpoints}.
      */
@@ -42,9 +38,9 @@ public class OctoEndpointMessageTransport
     /**
      * Initializes a new {@link AbstractEndpointMessageTransport} instance.
      */
-    public OctoEndpointMessageTransport(OctoEndpoints octoEndpoints)
+    OctoEndpointMessageTransport(OctoEndpoints octoEndpoints, Logger parentLogger)
     {
-        super(null);
+        super(null, parentLogger);
         this.octoEndpoints = octoEndpoints;
     }
 
@@ -70,30 +66,10 @@ public class OctoEndpointMessageTransport
     }
 
     /**
-     * Overrides the default implementation to prevent the message from being
-     * sent on the Octo channel (which is where it came from).
-     *
-     * @param msg the message to send.
-     * @param endpoints the list of endpoints to receive the message.
-     */
-    @Override
-    protected void sendMessageToEndpoints(
-        String msg,
-        List<AbstractEndpoint> endpoints)
-    {
-        Conference conference = getConference();
-        if (conference != null)
-        {
-            // Do NOT send the message to Octo, that's where it came from!
-            conference.sendMessage(msg, endpoints, false /* sendToOcto */);
-        }
-    }
-
-    /**
      * {@inheritDoc}
      * </p>
      * We don't expect any of these messages to go through Octo, so we log a
-     * message.
+     * warning.
      */
     @Override
     protected void onSelectedEndpointChangedEvent(
@@ -107,7 +83,7 @@ public class OctoEndpointMessageTransport
      * {@inheritDoc}
      * </p>
      * We don't expect any of these messages to go through Octo, so we log a
-     * message.
+     * warning.
      */
     @Override
     protected void onSelectedEndpointsChangedEvent(
@@ -121,7 +97,7 @@ public class OctoEndpointMessageTransport
      * {@inheritDoc}
      * </p>
      * We don't expect any of these messages to go through Octo, so we log a
-     * message.
+     * warning.
      */
     @Override
     protected void onPinnedEndpointChangedEvent(
@@ -135,7 +111,7 @@ public class OctoEndpointMessageTransport
      * {@inheritDoc}
      * </p>
      * We don't expect any of these messages to go through Octo, so we log a
-     * message.
+     * warning.
      */
     @Override
     protected void onPinnedEndpointsChangedEvent(
@@ -149,7 +125,7 @@ public class OctoEndpointMessageTransport
      * {@inheritDoc}
      * </p>
      * We don't expect any of these messages to go through Octo, so we log a
-     * message.
+     * warning.
      */
     @Override
     protected void onClientHello(Object src, JSONObject jsonObject)
@@ -161,12 +137,26 @@ public class OctoEndpointMessageTransport
      * {@inheritDoc}
      * </p>
      * We don't expect any of these messages to go through Octo, so we log a
-     * message.
+     * warning.
      */
     @Override
     protected void onReceiverVideoConstraintEvent(
         Object src,
         JSONObject jsonObject)
+    {
+        logUnexpectedMessage(jsonObject.toJSONString());
+    }
+
+    /**
+     * {@inheritDoc}
+     * </p>
+     * We don't expect any of these messages to go through Octo, so we log a
+     * warning.
+     */
+    @Override
+    protected void onLastNChangedEvent(
+            Object src,
+            JSONObject jsonObject)
     {
         logUnexpectedMessage(jsonObject.toJSONString());
     }

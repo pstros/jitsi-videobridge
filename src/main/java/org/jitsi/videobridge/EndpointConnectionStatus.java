@@ -1,5 +1,5 @@
 /*
- * Copyright @ 2015 Atlassian Pty Ltd
+ * Copyright @ 2015 - Present, 8x8 Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,13 +15,14 @@
  */
 package org.jitsi.videobridge;
 
-import java.util.*;
-
-import net.java.sip.communicator.util.*;
 import org.jitsi.eventadmin.*;
 import org.jitsi.osgi.*;
 import org.jitsi.service.configuration.*;
+import org.jitsi.utils.logging2.*;
+import org.jitsi.videobridge.shim.*;
 import org.osgi.framework.*;
+
+import java.util.*;
 
 import static org.jitsi.videobridge.EndpointMessageBuilder.*;
 
@@ -31,9 +32,8 @@ import static org.jitsi.videobridge.EndpointMessageBuilder.*;
  * the data channel.
  *
  * An endpoint's connectivity status is considered connected as long as there
- * is any traffic activity seen on any of it's channels as defined in
- * {@link Channel#lastTransportActivityTime}. When there is no activity for
- * longer than {@link #maxInactivityLimit} it will be assumed that
+ * is any traffic activity seen on any of its endpoints. When there is no
+ * activity for longer than {@link #maxInactivityLimit} it will be assumed that
  * the endpoint is having some connectivity issues. Those may be temporary or
  * permanent. When that happens there will be a Colibri message broadcast
  * to all conference endpoints. The Colibri class name of the message is defined
@@ -41,9 +41,6 @@ import static org.jitsi.videobridge.EndpointMessageBuilder.*;
  * and it will contain "active" attribute set to "false". If those problems turn
  * out to be temporary and the traffic is restored another message is sent with
  * "active" set to "true".
- *
- * The module is started by OSGi as configured in
- * {@link org.jitsi.videobridge.osgi.JvbBundleConfig}
  *
  * @author Pawel Domas
  */
@@ -85,7 +82,7 @@ public class EndpointConnectionStatus
      * The logger instance used by this class.
      */
     private final static Logger logger
-        = Logger.getLogger(EndpointConnectionStatus.class);
+        = new LoggerImpl(EndpointConnectionStatus.class.getName());
 
     /**
      * How long it can take an endpoint to send first data, before it will
@@ -154,7 +151,7 @@ public class EndpointConnectionStatus
             logger.error("Endpoint connection monitoring is already running");
         }
 
-        ConfigurationService config = ServiceUtils.getService(
+        ConfigurationService config = ServiceUtils2.getService(
                 bundleContext, ConfigurationService.class);
 
         firstTransferTimeout = config.getLong(
@@ -205,22 +202,23 @@ public class EndpointConnectionStatus
         BundleContext bundleContext = this.bundleContext;
         if (bundleContext != null)
         {
-            Collection<Videobridge> jvbs
-                = Videobridge.getVideobridges(bundleContext);
-            for (Videobridge videobridge : jvbs)
-            {
-                cleanupExpiredEndpointsStatus();
+            Videobridge videobridge
+                = ServiceUtils2.getService(bundleContext, Videobridge.class);
+            cleanupExpiredEndpointsStatus();
 
-                Conference[] conferences = videobridge.getConferences();
-                Arrays.stream(conferences)
-                    .forEachOrdered(
-                        conference ->
-                            conference.getEndpoints()
-                                .forEach(this::monitorEndpointActivity));
-            }
+            Conference[] conferences = videobridge.getConferences();
+            Arrays.stream(conferences)
+                .forEachOrdered(
+                    conference ->
+                        conference.getEndpoints()
+                            .forEach(this::monitorEndpointActivity));
         }
     }
 
+    /**
+     * Checks the activity for a specific {@link Endpoint}.
+     * @param abstractEndpoint the endpoint.
+     */
     private void monitorEndpointActivity(AbstractEndpoint abstractEndpoint)
     {
         if (!(abstractEndpoint instanceof Endpoint))
@@ -233,33 +231,12 @@ public class EndpointConnectionStatus
         Endpoint endpoint = (Endpoint) abstractEndpoint;
         String endpointId = endpoint.getID();
 
-        // Go over all RTP channels to get the latest timestamp
-        List<RtpChannel> rtpChannels = endpoint.getChannels();
-        long lastActivity
-            = rtpChannels.stream()
-                .mapToLong(RtpChannel::getLastTransportActivityTime)
-                .max().orElse(0);
-        long mostRecentChannelCreated
-            = rtpChannels.stream()
-                .mapToLong(RtpChannel::getCreationTimestamp)
-                .max().orElse(0);
+        long mostRecentChannelCreated = endpoint.channelShims.stream()
+                .mapToLong(ChannelShim::getCreationTimestampMs)
+                .max()
+                .orElse(0);
 
-        // Also check SctpConnection
-        SctpConnection sctpConnection = endpoint.getSctpConnection();
-        if (sctpConnection != null)
-        {
-            long lastSctpActivity
-                = sctpConnection.getLastTransportActivityTime();
-            if (lastSctpActivity > lastActivity)
-            {
-                lastActivity = lastSctpActivity;
-            }
-            long creationTimestamp = sctpConnection.getCreationTimestamp();
-            if (creationTimestamp > mostRecentChannelCreated)
-            {
-                mostRecentChannelCreated = creationTimestamp;
-            }
-        }
+        long lastActivity = endpoint.getLastActivity();
 
         // Transport not initialized yet
         if (lastActivity == 0)
@@ -316,6 +293,14 @@ public class EndpointConnectionStatus
         }
     }
 
+    /**
+     * Sends a Colibri message about the status of an endpoint to a specific
+     * target endpoint or to all endpoints.
+     * @param subjectEndpoint the endpoint which the message concerns
+     * @param isConnected whether the subject endpoint is connected
+     * @param msgReceiver the target endpoint, or {@code null} to broadcast
+     * to all endpoints.
+     */
     private void sendEndpointConnectionStatus(
         Endpoint subjectEndpoint, boolean isConnected, Endpoint msgReceiver)
     {
@@ -348,6 +333,9 @@ public class EndpointConnectionStatus
         }
     }
 
+    /**
+     * Prunes the {@link #inactiveEndpoints} list.
+     */
     private void cleanupExpiredEndpointsStatus()
     {
         inactiveEndpoints.removeIf(e -> {

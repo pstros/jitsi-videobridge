@@ -1,5 +1,5 @@
 /*
- * Copyright @ 2018 Atlassian Pty Ltd
+ * Copyright @ 2018 - Present, 8x8 Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,12 +15,11 @@
  */
 package org.jitsi.videobridge.xmpp;
 
-import net.java.sip.communicator.impl.protocol.jabber.*;
-import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
-import net.java.sip.communicator.impl.protocol.jabber.extensions.health.*;
 import org.jitsi.osgi.*;
-import org.jitsi.service.version.*;
+import org.jitsi.utils.version.*;
 import org.jitsi.videobridge.*;
+import org.jitsi.xmpp.extensions.colibri.*;
+import org.jitsi.xmpp.extensions.health.*;
 import org.jitsi.xmpp.util.*;
 import org.jivesoftware.smack.packet.*;
 import org.jivesoftware.smackx.iqversion.packet.Version;
@@ -36,15 +35,20 @@ import org.osgi.framework.*;
  */
 class XmppCommon
 {
+    /**
+     * The {@link Logger} used by the {@link XmppCommon} class and its
+     * instances for logging output.
+     */
+    private static final org.jitsi.utils.logging.Logger logger
+        =  org.jitsi.utils.logging.Logger.getLogger(XmppCommon.class);
 
     static final String[] FEATURES
         = new String[]
         {
             ColibriConferenceIQ.NAMESPACE,
             HealthCheckIQ.NAMESPACE,
-            ProtocolProviderServiceJabberImpl.URN_XMPP_JINGLE_DTLS_SRTP,
-            ProtocolProviderServiceJabberImpl.URN_XMPP_JINGLE_ICE_UDP_1,
-            ProtocolProviderServiceJabberImpl.URN_XMPP_JINGLE_RAW_UDP_0,
+            "urn:xmpp:jingle:apps:dtls:0",
+            "urn:xmpp:jingle:transports:ice-udp:1",
             Version.NAMESPACE
     };
 
@@ -66,11 +70,17 @@ class XmppCommon
         return bundleContext;
     }
 
+    /**
+     * Starts this {@link XmppCommon} in a specific OSGi bundle context.
+     */
     void start(BundleContext bundleContext)
     {
         this.bundleContext = bundleContext;
     }
 
+    /**
+     * Stops this {@link XmppCommon}.
+     */
     void stop(BundleContext bundleContext)
     {
         this.bundleContext = null;
@@ -106,6 +116,25 @@ class XmppCommon
     }
 
     /**
+     * Processes an IQ received from one of the XMPP stacks.
+     */
+    IQ handleIQ(IQ requestIQ)
+    {
+        if (logger.isDebugEnabled() && requestIQ != null)
+        {
+            logger.debug("RECV: " + requestIQ.toXML());
+        }
+
+        IQ replyIQ = handleIQInternal(requestIQ);
+
+        if (logger.isDebugEnabled() && replyIQ != null)
+        {
+            logger.debug("SENT: " + replyIQ.toXML());
+        }
+
+        return replyIQ;
+    }
+    /**
      * Handles an <tt>org.jivesoftware.smack.packet.IQ</tt> stanza of type
      * <tt>get</tt> or <tt>set</tt> which represents a request.
      *
@@ -115,7 +144,7 @@ class XmppCommon
      * represents the response to the specified request or <tt>null</tt> to
      * reply with <tt>feature-not-implemented</tt>
      */
-    IQ handleIQ(IQ iq)
+    private IQ handleIQInternal(IQ iq)
     {
         IQ responseIQ = null;
 
@@ -141,6 +170,9 @@ class XmppCommon
         return responseIQ;
     }
 
+    /**
+     * Handles an IQ request (of type 'get' or 'set').
+     */
     private IQ handleIQRequest(IQ request)
     {
         // Requests can be categorized in pieces of Videobridge functionality
@@ -202,8 +234,8 @@ class XmppCommon
                 XMPPError.getBuilder(XMPPError.Condition.service_unavailable));
         }
 
-        org.jitsi.service.version.Version
-            currentVersion = versionService.getCurrentVersion();
+        org.jitsi.utils.version.Version currentVersion
+                = versionService.getCurrentVersion();
 
         if (currentVersion == null)
         {
@@ -228,6 +260,9 @@ class XmppCommon
         return versionResult;
     }
 
+    /**
+     * Handles a response IQ (of type 'result' or 'error').
+     */
     private void handleIQResponse(IQ response)
     {
         Videobridge videobridge = getVideobridge();
