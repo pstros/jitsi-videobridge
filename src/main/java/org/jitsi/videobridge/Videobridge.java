@@ -20,10 +20,11 @@ import java.util.*;
 import java.util.concurrent.atomic.*;
 import java.util.regex.*;
 
-import net.java.sip.communicator.impl.protocol.jabber.extensions.*;
-import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
-import net.java.sip.communicator.impl.protocol.jabber.extensions.health.*;
-import net.java.sip.communicator.impl.protocol.jabber.extensions.jingle.*;
+import org.jitsi.service.neomedia.*;
+import org.jitsi.xmpp.extensions.*;
+import org.jitsi.xmpp.extensions.colibri.*;
+import org.jitsi.xmpp.extensions.health.*;
+import org.jitsi.xmpp.extensions.jingle.*;
 import net.java.sip.communicator.service.shutdown.*;
 import net.java.sip.communicator.util.*;
 
@@ -34,9 +35,8 @@ import org.jitsi.impl.neomedia.transform.*;
 import org.jitsi.osgi.*;
 import org.jitsi.service.configuration.*;
 import org.jitsi.service.libjitsi.*;
-import org.jitsi.service.neomedia.*;
-import org.jitsi.util.*;
-import org.jitsi.util.Logger;
+import org.jitsi.utils.logging.Logger;
+import org.jitsi.utils.*;
 import org.jitsi.videobridge.health.*;
 import org.jitsi.videobridge.octo.*;
 import org.jitsi.videobridge.pubsub.*;
@@ -950,7 +950,8 @@ public class Videobridge
                 channel.setRtpHeaderExtensions(
                         channelIQ.getRtpHeaderExtensions());
 
-                channel.setDirection(channelIQ.getDirection());
+                channel.setDirection(
+                    MediaDirection.parseString(channelIQ.getDirection()));
 
                 channel.setRtpEncodingParameters(
                     channelIQ.getSources(), channelIQ.getSourceGroups());

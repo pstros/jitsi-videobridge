@@ -22,14 +22,13 @@ import java.util.*;
 
 import javax.media.rtp.*;
 
-import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
-import net.java.sip.communicator.impl.protocol.jabber.extensions.jingle.*;
-import net.java.sip.communicator.impl.protocol.jabber.jinglesdp.*;
+import org.jitsi.xmpp.extensions.colibri.*;
+import org.jitsi.xmpp.extensions.jingle.*;
+import net.java.sip.communicator.impl.protocol.jabber.jinglesdp.JingleUtils;
 import net.java.sip.communicator.util.*;
 import net.sf.fmj.media.rtp.*;
 import net.sf.fmj.media.rtp.RTPHeader;
 
-import org.ice4j.socket.*;
 import org.jitsi.eventadmin.*;
 import org.jitsi.impl.neomedia.*;
 import org.jitsi.impl.neomedia.rtp.*;
@@ -42,8 +41,10 @@ import org.jitsi.service.neomedia.format.*;
 import org.jitsi.service.neomedia.recording.*;
 import org.jitsi.service.neomedia.stats.*;
 import org.jitsi.util.*;
-import org.jitsi.util.Logger;
-import org.jitsi.util.event.*;
+import org.jitsi.utils.logging.Logger;
+import org.jitsi.utils.logging.DiagnosticContext;
+import org.jitsi.utils.event.*;
+import org.jitsi.utils.*;
 import org.jitsi.videobridge.transform.*;
 import org.jitsi.videobridge.xmpp.*;
 import org.jxmpp.jid.*;
@@ -697,7 +698,10 @@ public class RtpChannel
 
         super.describe(iq);
 
-        iq.setDirection(stream.getDirection());
+        iq.setDirection(
+            stream.getDirection() != null ?
+                stream.getDirection().toString()
+                : null);
 
         iq.setLastN(null);
 

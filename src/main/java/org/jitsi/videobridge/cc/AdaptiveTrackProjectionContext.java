@@ -17,6 +17,7 @@ package org.jitsi.videobridge.cc;
 
 import org.jitsi.impl.neomedia.rtp.*;
 import org.jitsi.service.neomedia.*;
+import org.jitsi.service.neomedia.format.*;
 
 /**
  * Implementations of this interface are responsible for projecting a specific
@@ -44,10 +45,11 @@ public interface AdaptiveTrackProjectionContext
      * Determines whether an RTP packet should be accepted or not.
      *
      * @param rtpPacket the RTP packet to determine whether to accept or not.
+     * @param incomingIndex the quality index of the incoming RTP packet.
      * @param targetIndex the target quality index
      * @return true if the packet should be accepted, false otherwise.
      */
-    boolean accept(RawPacket rtpPacket, int targetIndex);
+    boolean accept(RawPacket rtpPacket, int incomingIndex, int targetIndex);
 
     /**
      * @return true if this stream context needs a keyframe in order to either
@@ -81,4 +83,16 @@ public interface AdaptiveTrackProjectionContext
      * case it needs to be dropped.
      */
     boolean rewriteRtcp(RawPacket rtcpPacket);
+
+    /**
+     * @return the RTP state that describes the max sequence number, max
+     * timestamp and other RTP-level details.
+     */
+    RtpState getRtpState();
+
+    /**
+     * @return the {@link MediaFormat} of the RTP packets that this context
+     * processes.
+     */
+    MediaFormat getFormat();
 }

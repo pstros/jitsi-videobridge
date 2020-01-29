@@ -22,8 +22,8 @@ import org.jitsi.service.configuration.*;
 import org.jitsi.service.libjitsi.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.service.neomedia.codec.*;
-import org.jitsi.util.*;
-import org.jitsi.util.concurrent.*;
+import org.jitsi.utils.concurrent.*;
+import org.jitsi.utils.logging.*;
 import org.jitsi.videobridge.*;
 
 import java.util.*;
@@ -205,7 +205,7 @@ public class BandwidthProbing
             DiagnosticContext diagnosticContext
                 = videoStreamImpl.getDiagnosticContext();
             timeSeriesLogger.trace(diagnosticContext
-                    .makeTimeSeriesPoint("out_padding")
+                    .makeTimeSeriesPoint("sent_padding")
                     .addField("padding_bps", paddingBps)
                     .addField("total_ideal_bps", totalIdealBps)
                     .addField("total_target_bps", totalTargetBps)

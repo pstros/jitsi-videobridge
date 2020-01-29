@@ -23,10 +23,9 @@ import java.util.concurrent.*;
 import java.util.function.*;
 import java.util.logging.*;
 
-import net.java.sip.communicator.impl.protocol.jabber.extensions.jingle.*;
+import org.jitsi.xmpp.extensions.jingle.*;
 
 import org.ice4j.socket.*;
-import org.ice4j.util.*;
 import org.jitsi.impl.neomedia.transform.dtls.*;
 import org.jitsi.impl.osgi.framework.*;
 import org.jitsi.sctp4j.*;
@@ -35,7 +34,9 @@ import org.jitsi.service.libjitsi.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.service.packetlogging.*;
 import org.jitsi.util.*;
-import org.jitsi.util.Logger; // Disambiguation.
+import org.jitsi.utils.queue.*;
+import org.jitsi.utils.concurrent.ExecutorUtils;
+import org.jitsi.utils.logging.Logger; // Disambiguation.
 
 /**
  * Class is a transport layer for WebRTC data channels. It consists of SCTP

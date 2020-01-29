@@ -17,12 +17,12 @@ package org.jitsi.videobridge;
 
 import java.util.*;
 
-import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
-import net.java.sip.communicator.impl.protocol.jabber.extensions.jingle.*;
+import org.jitsi.xmpp.extensions.colibri.*;
+import org.jitsi.xmpp.extensions.jingle.*;
 
 import org.jitsi.service.neomedia.*;
 import org.jitsi.service.neomedia.device.*;
-import org.jitsi.service.neomedia.event.*;
+import org.jitsi.utils.*;
 
 /**
  * Implements an <tt>RtpChannel</tt> with <tt>MediaType.AUDIO</tt>.

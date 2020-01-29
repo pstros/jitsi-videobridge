@@ -23,8 +23,8 @@ import java.util.*;
 import java.util.concurrent.atomic.*;
 import java.util.logging.*;
 
-import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
-import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.ColibriConferenceIQ.Recording.*;
+import org.jitsi.xmpp.extensions.colibri.*;
+import org.jitsi.xmpp.extensions.colibri.ColibriConferenceIQ.Recording.*;
 import net.java.sip.communicator.util.*;
 
 import org.jetbrains.annotations.*;
@@ -33,9 +33,10 @@ import org.jitsi.service.configuration.*;
 import org.jitsi.service.libjitsi.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.service.neomedia.recording.*;
-import org.jitsi.util.*;
-import org.jitsi.util.Logger;
-import org.jitsi.util.event.*;
+import org.jitsi.utils.logging.*;
+import org.jitsi.utils.logging.Logger;
+import org.jitsi.utils.event.*;
+import org.jitsi.utils.*;
 import org.jitsi.videobridge.util.*;
 import org.jitsi.videobridge.octo.*;
 import org.jxmpp.jid.*;

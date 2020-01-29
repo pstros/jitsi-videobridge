@@ -21,7 +21,10 @@ import org.jitsi.impl.neomedia.codec.video.vp8.*;
 import org.jitsi.impl.neomedia.rtcp.*;
 import org.jitsi.impl.neomedia.rtp.*;
 import org.jitsi.service.neomedia.*;
+import org.jitsi.service.neomedia.format.*;
 import org.jitsi.util.*;
+import org.jitsi.utils.*;
+import org.jitsi.utils.ArrayUtils;
 import org.jitsi.videobridge.cc.*;
 
 import java.util.*;
@@ -97,13 +100,35 @@ public class VP8AdaptiveTrackProjectionContext
     private long transmittedPackets = 0;
 
     /**
+     * The VP8 media format. No essential functionality relies on this field,
+     * it's only used as a cache of the {@link MediaFormat} instance for VP8 in
+     * case we have to do a context switch (see {@link AdaptiveTrackProjection}),
+     * in order to avoid having to resolve the format from the
+     * {@link MediaStream#getDynamicRTPPayloadType(String)} which is a hot path.
+     */
+    private final MediaFormat format;
+
+    /**
      * Ctor.
      *
-     * @param ssrc the SSRC of the projection.
+     * @param format the VP8 media format.
+     * @param rtpState the RTP state to begin with.
      */
-    public VP8AdaptiveTrackProjectionContext(long ssrc)
+    public VP8AdaptiveTrackProjectionContext(
+        @NotNull MediaFormat format, @NotNull RtpState rtpState)
     {
-        lastVP8FrameProjection = new VP8FrameProjection(ssrc);
+        this.format = format;
+
+        // Compute the starting sequence number and the timestamp of the initial
+        // frame based on the RTP state.
+        int startingSequenceNumber =
+            (rtpState.maxSequenceNumber + 1) & RawPacket.SEQUENCE_NUMBER_MASK;
+
+        long timestamp =
+            (rtpState.maxTimestamp + 3000) & RawPacket.TIMESTAMP_MASK;
+
+        lastVP8FrameProjection = new VP8FrameProjection(
+            rtpState.ssrc, startingSequenceNumber, timestamp);
     }
 
     /**
@@ -168,12 +193,13 @@ public class VP8AdaptiveTrackProjectionContext
      * method at a time.
      *
      * @param rtpPacket the VP8 packet to decide whether or not to project.
-     * @param targetIndex
+     * @param incomingIndex the quality index of the incoming RTP packet
+     * @param targetIndex the target quality index we want to achieve
      * @return true to project the packet, otherwise false.
      */
     private synchronized
     VP8FrameProjection createVP8FrameProjection(
-        @NotNull RawPacket rtpPacket, int targetIndex)
+        @NotNull RawPacket rtpPacket, int incomingIndex, int targetIndex)
     {
         // Creating a new VP8 projection depends on reading and results in
         // writing of the last VP8 frame, therefore this method needs to be
@@ -213,7 +239,8 @@ public class VP8AdaptiveTrackProjectionContext
         // Lastly, check whether the quality of the frame is something that we
         // want to forward. We don't want to be allocating new objects unless
         // we're interested in the quality of this frame.
-        if (!vp8QualityFilter.acceptFrame(rtpPacket, targetIndex, nowMs))
+        if (!vp8QualityFilter.acceptFrame(
+            rtpPacket, incomingIndex, targetIndex, nowMs))
         {
             return null;
         }
@@ -326,18 +353,21 @@ public class VP8AdaptiveTrackProjectionContext
      * Determines whether a packet should be accepted or not.
      *
      * @param rtpPacket the RTP packet to determine whether to project or not.
-     * @param targetIndex the target index to achieve
+     * @param incomingIndex the quality index of the incoming RTP packet
+     * @param targetIndex the target quality index we want to achieve
      * @return true if the packet should be accepted, false otherwise.
      */
     @Override
-    public boolean accept(@NotNull RawPacket rtpPacket, int targetIndex)
+    public boolean accept(
+        @NotNull RawPacket rtpPacket, int incomingIndex, int targetIndex)
     {
         VP8FrameProjection vp8FrameProjection
             = lookupVP8FrameProjection(rtpPacket);
 
         if (vp8FrameProjection == null)
         {
-            vp8FrameProjection = createVP8FrameProjection(rtpPacket, targetIndex);
+            vp8FrameProjection
+                = createVP8FrameProjection(rtpPacket, incomingIndex, targetIndex);
         }
 
         return vp8FrameProjection != null
@@ -410,6 +440,26 @@ public class VP8AdaptiveTrackProjectionContext
         }
 
         return rtcpPacket.getLength() > 0;
+    }
+
+    @Override
+    public RtpState getRtpState()
+    {
+        synchronized (this)
+        {
+            lastVP8FrameProjection.close();
+        }
+
+        return new RtpState(transmittedBytes, transmittedPackets,
+            lastVP8FrameProjection.getSSRC(),
+            lastVP8FrameProjection.maxSequenceNumber(),
+            lastVP8FrameProjection.getTimestamp());
+    }
+
+    @Override
+    public MediaFormat getFormat()
+    {
+        return format;
     }
 
     /**

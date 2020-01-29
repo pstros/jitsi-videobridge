@@ -16,7 +16,7 @@
 package org.jitsi.videobridge.octo;
 
 import org.ice4j.socket.*;
-import org.jitsi.util.*;
+import org.jitsi.utils.logging.*;
 
 import java.net.*;
 
@@ -36,6 +36,11 @@ public class OctoRelay
      */
     private static final Logger logger
         = Logger.getLogger(OctoRelay.class);
+
+    /**
+     * The receive buffer size to set of the socket.
+     */
+    private static final int SO_RCVBUF = 10 * 1024 * 1024;
 
     /**
      * The socket used to send and receive Octo packets.
@@ -64,10 +69,22 @@ public class OctoRelay
     public OctoRelay(String address, int port)
         throws UnknownHostException, SocketException
     {
-        DatagramSocket s
-            = new DatagramSocket(
-                    new InetSocketAddress(InetAddress.getByName(address), port));
-        socket = new MultiplexingDatagramSocket(s, true /* persistent */);
+        InetSocketAddress addr
+                = new InetSocketAddress(InetAddress.getByName(address), port);
+        DatagramSocket s = new DatagramSocket(addr);
+        s.setReceiveBufferSize(SO_RCVBUF);
+        logger.info("Initialized OctoRelay with address " + addr +
+                ". Receive buffer size " + s.getReceiveBufferSize() +
+                " (asked for " + SO_RCVBUF + ").");
+
+        socket = new MultiplexingDatagramSocket(s, true /* persistent */)
+        {
+            @Override
+            public void setReceiveBufferSize(int size)
+            {
+                // We want to keep the buffer size to the one we set above.
+            }
+        };
         this.port = port;
         String id = address + ":" + port;
         setRelayId(id);

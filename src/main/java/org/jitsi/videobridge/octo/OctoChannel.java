@@ -15,11 +15,13 @@
  */
 package org.jitsi.videobridge.octo;
 
-import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
-import net.java.sip.communicator.impl.protocol.jabber.extensions.jingle.*;
+import org.jitsi.xmpp.extensions.colibri.*;
+import org.jitsi.xmpp.extensions.jingle.*;
 import org.jitsi.impl.neomedia.rtp.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.util.*;
+import org.jitsi.utils.*;
+import org.jitsi.utils.logging.Logger;
 import org.jitsi.videobridge.*;
 import org.jitsi.videobridge.xmpp.*;
 
@@ -42,6 +44,11 @@ public class OctoChannel
      */
     private static final Logger classLogger
         = Logger.getLogger(OctoChannel.class);
+
+    /**
+     * Expiration timeout for Octo channels.
+     */
+    private static final int OCTO_EXPIRE = 2 * 60 * 60 * 1000;
 
     /**
      * The Octo ID of the conference, configured in {@link Conference} as the
@@ -129,6 +136,8 @@ public class OctoChannel
 
         logger
             = Logger.getLogger(classLogger, content.getConference().getLogger());
+
+        setExpire(OCTO_EXPIRE);
     }
 
     /**
@@ -451,5 +460,19 @@ public class OctoChannel
         }
 
         return false;
+    }
+
+    /**
+     * Don't expire Octo channels due to lack of transport activity, but allow
+     * for them to be explicitly expired by signaling (by setting expire=0).
+     */
+    @Override
+    public void setExpire(int expire)
+    {
+        if (expire > 0)
+        {
+            expire = Math.max(expire, OCTO_EXPIRE);
+        }
+        super.setExpire(expire);
     }
 }

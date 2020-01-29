@@ -23,7 +23,9 @@ import org.jitsi.service.libjitsi.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.service.neomedia.codec.*;
 import org.jitsi.service.neomedia.rtp.*;
-import org.jitsi.util.*;
+import org.jitsi.utils.*;
+import org.jitsi.utils.logging.*;
+import org.jitsi.utils.ArrayUtils;
 import org.jitsi.videobridge.*;
 
 import java.util.*;
@@ -397,7 +399,8 @@ public class BitrateController
         {
             logger.warn(
                 "Dropping an RTP packet, because the SSRC has not " +
-                    "been signaled:" + ssrc);
+                    "been signaled " +
+                    ((MediaStreamImpl) dest.getStream()).packetToString(pkt));
             return false;
         }
 
@@ -415,6 +418,14 @@ public class BitrateController
      */
     public void update(long bweBps)
     {
+        if (timeSeriesLogger.isTraceEnabled())
+        {
+            VideoMediaStreamImpl destStream
+                = (VideoMediaStreamImpl) dest.getStream();
+            timeSeriesLogger.trace(destStream.getDiagnosticContext()
+                    .makeTimeSeriesPoint("new_bwe")
+                    .addField("bwe_bps", bweBps));
+        }
         update(null, bweBps);
     }
 
@@ -576,7 +587,7 @@ public class BitrateController
                                 trackBitrateAllocation.oversending)
                             .addField("preferred_idx",
                                 trackBitrateAllocation.ratedPreferredIdx)
-                            .addField("endpoint_id",
+                            .addField("remote_endpoint_id",
                                 trackBitrateAllocation.endpointID)
                             .addField("ideal_bps", trackIdealBps));
                     }
@@ -617,10 +628,10 @@ public class BitrateController
             DiagnosticContext diagnosticContext
                 = destStream.getDiagnosticContext();
             timeSeriesLogger.trace(diagnosticContext
-                    .makeTimeSeriesPoint("video_quality", nowMs)
+                    .makeTimeSeriesPoint("did_update", nowMs)
                     .addField("total_target_idx", totalTargetIdx)
                     .addField("total_ideal_idx", totalIdealIdx)
-                    .addField("available_bps", bweBps)
+                    .addField("bwe_bps", bweBps)
                     .addField("total_target_bps", totalTargetBps)
                     .addField("total_ideal_bps", totalIdealBps));
         }
@@ -675,6 +686,9 @@ public class BitrateController
 
             adaptiveTrackProjection = new AdaptiveTrackProjection(
                 trackBitrateAllocation.track);
+
+            logger.info(
+                "new track projection for " + trackBitrateAllocation.track);
 
             // Route all encodings to the specified bitrate controller.
             for (RTPEncodingDesc rtpEncoding : rtpEncodings)

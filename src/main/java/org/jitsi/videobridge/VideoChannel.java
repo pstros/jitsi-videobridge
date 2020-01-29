@@ -19,8 +19,8 @@ import java.beans.*;
 import java.io.*;
 import java.util.*;
 
-import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
-import net.java.sip.communicator.impl.protocol.jabber.extensions.jingle.*;
+import org.jitsi.xmpp.extensions.colibri.*;
+import org.jitsi.xmpp.extensions.jingle.*;
 
 import org.jitsi.impl.neomedia.*;
 import org.jitsi.impl.neomedia.rtp.*;
@@ -30,9 +30,9 @@ import org.jitsi.service.libjitsi.*;
 import org.jitsi.service.neomedia.*;
 import org.jitsi.service.neomedia.codec.*;
 import org.jitsi.service.neomedia.rtp.*;
-import org.jitsi.util.*;
-import org.jitsi.util.Logger; // Disambiguation.
-import org.jitsi.util.concurrent.*;
+import org.jitsi.utils.*;
+import org.jitsi.utils.logging.Logger; // Disambiguation.
+import org.jitsi.utils.concurrent.*;
 import org.jitsi.videobridge.cc.*;
 
 import static org.jitsi.videobridge.EndpointMessageBuilder.*;

@@ -15,8 +15,8 @@
  */
 package org.jitsi.videobridge.xmpp;
 
-import net.java.sip.communicator.impl.protocol.jabber.extensions.colibri.*;
-import net.java.sip.communicator.impl.protocol.jabber.extensions.health.*;
+import org.jitsi.xmpp.extensions.colibri.*;
+import org.jitsi.xmpp.extensions.health.*;
 import net.java.sip.communicator.util.*;
 import org.jitsi.osgi.*;
 import org.jitsi.service.configuration.*;
@@ -39,8 +39,8 @@ public class ClientConnectionImpl
      * The {@link Logger} used by the {@link ClientConnectionImpl}
      * class and its instances for logging output.
      */
-    private static final org.jitsi.util.Logger logger
-        =  org.jitsi.util.Logger.getLogger(ClientConnectionImpl.class);
+    private static final org.jitsi.utils.logging.Logger logger
+        =  org.jitsi.utils.logging.Logger.getLogger(ClientConnectionImpl.class);
 
     /**
      * The prefix of the property names used to configure this bundle.
