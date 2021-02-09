@@ -5,4 +5,4 @@
 # VIDEOBRIDGE_MAX_MEMORY=3072m
 
 # Uncomment the next line to enable the remote debugging of the video bridge
-# VIDEOBRIDGE_DEBUG_OPTIONS="-Xdebug -Xrunjdwp:transport=dt_socket,server=y,suspend=n,address=8000"
+VIDEOBRIDGE_DEBUG_OPTIONS="-Xdebug -Xrunjdwp:transport=dt_socket,server=y,suspend=n,address=8000"
